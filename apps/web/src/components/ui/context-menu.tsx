@@ -7,14 +7,21 @@ export const ContextMenu = Primitive.Root;
 export const ContextMenuTrigger = React.forwardRef<
   React.ComponentRef<typeof Primitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof Primitive.Trigger>
->(function ContextMenuTrigger({ onKeyDown, ...props }, ref) {
+>(function ContextMenuTrigger(
+  { onKeyDown, asChild, disabled, tabIndex, ...props },
+  ref,
+) {
   return (
     <Primitive.Trigger
       ref={ref}
+      asChild={asChild}
+      disabled={disabled}
+      tabIndex={disabled ? -1 : (tabIndex ?? (asChild ? undefined : 0))}
       {...props}
       onKeyDown={(event) => {
         onKeyDown?.(event);
         if (
+          !disabled &&
           !event.defaultPrevented &&
           (event.key === 'ContextMenu' ||
             (event.shiftKey && event.key === 'F10'))

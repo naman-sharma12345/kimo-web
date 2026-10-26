@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { readFileSync } from 'node:fs';
 import {
   act,
   fireEvent,
@@ -319,19 +320,75 @@ describe('Phase 1 keyboard contracts', () => {
     const user = userEvent.setup();
     render(
       <ContextMenu>
-        <ContextMenuTrigger tabIndex={0}>Clip</ContextMenuTrigger>
+        <ContextMenuTrigger>Clip</ContextMenuTrigger>
         <ContextMenuContent>
           <ContextMenuItem>Duplicate</ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>,
     );
     await user.tab();
+    expect(screen.getByText('Clip')).toHaveFocus();
     await user.keyboard('{Shift>}{F10}{/Shift}');
     expect(await screen.findByRole('menu')).toBeInTheDocument();
     await user.keyboard('{Escape}');
     await waitFor(() =>
       expect(screen.queryByRole('menu')).not.toBeInTheDocument(),
     );
+  });
+  it('respects explicit context trigger tab order and disabled keyboard behavior', async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <ContextMenu>
+          <ContextMenuTrigger tabIndex={-1}>Excluded clip</ContextMenuTrigger>
+        </ContextMenu>
+        <ContextMenu>
+          <ContextMenuTrigger disabled>Disabled clip</ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem>Duplicate</ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+        <Button>Next</Button>
+      </>,
+    );
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Next' })).toHaveFocus();
+    expect(screen.getByText('Excluded clip')).toHaveAttribute('tabindex', '-1');
+    expect(screen.getByText('Disabled clip')).toHaveAttribute('tabindex', '-1');
+    fireEvent.keyDown(screen.getByText('Disabled clip'), {
+      key: 'F10',
+      shiftKey: true,
+    });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+  it('preserves an asChild context trigger native focus and explicit child tab order', async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <button type="button" tabIndex={-1}>
+              Excluded child
+            </button>
+          </ContextMenuTrigger>
+        </ContextMenu>
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <button type="button">Native child</button>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem>Duplicate</ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      </>,
+    );
+    expect(
+      screen.getByRole('button', { name: 'Excluded child' }),
+    ).toHaveAttribute('tabindex', '-1');
+    await user.tab();
+    expect(screen.getByRole('button', { name: 'Native child' })).toHaveFocus();
+    await user.keyboard('{ContextMenu}');
+    expect(await screen.findByRole('menu')).toBeInTheDocument();
   });
   it('traps dialog focus and restores it after Escape', async () => {
     const user = userEvent.setup();
@@ -515,5 +572,33 @@ describe('Toast lifecycle', () => {
     await user.click(screen.getByRole('button', { name: 'Notify' }));
     expect(screen.getAllByRole('status')).toHaveLength(3);
     expect(screen.queryByText('Saved 0')).not.toBeInTheDocument();
+  });
+});
+
+// Source-level style contracts only; these do not claim rendered-browser verification.
+describe('keyboard focus style contracts', () => {
+  const css = readFileSync(
+    `${process.cwd()}/apps/web/src/styles/ui.css`,
+    'utf8',
+  );
+  it('keeps the slider keyboard focus ring after its resting ring', () => {
+    const focusRule = '.ui-slider-thumb:focus-visible';
+    expect(css.indexOf(focusRule)).toBeGreaterThan(
+      css.indexOf('.ui-slider-thumb {'),
+    );
+    expect(css).toMatch(
+      /\.ui-slider-thumb:focus-visible\s*\{\s*box-shadow:\s*var\(--focus-ring\);\s*\}/,
+    );
+  });
+  it('limits menu focus rings to focus-visible, not pointer highlight', () => {
+    const highlight = css.match(
+      /\.ui-menu-item:is\(\[data-highlighted\], \[data-state='hover'\]\)\s*\{([^}]+)\}/,
+    );
+    expect(highlight).not.toBeNull();
+    expect(highlight?.[1]).toContain('background: var(--ink-3)');
+    expect(highlight?.[1]).not.toContain('box-shadow');
+    expect(css).toMatch(
+      /\.ui-menu-item:focus-visible\s*\{\s*box-shadow:\s*var\(--focus-ring\);\s*\}/,
+    );
   });
 });

@@ -23,8 +23,8 @@ import {
   DialogDescription,
   DialogActions,
 } from '@/components/ui/dialog';
-import { ToastProvider, useToast } from '@/components/ui/toast';
-import { attachUploadBrowserEvents, useUploads } from '@/lib/uploads';
+import { useToast } from '@/components/ui/toast';
+import { persistSession, useUploads } from '@/lib/uploads';
 import { durations, easings, spring } from '@/lib/motion';
 import {
   fileAccept,
@@ -50,13 +50,6 @@ interface LocalAttachment {
   preview?: string;
 }
 export function LandingPage() {
-  return (
-    <ToastProvider>
-      <LandingContent />
-    </ToastProvider>
-  );
-}
-function LandingContent() {
   const router = useRouter();
   const reduced = useReducedMotion();
   const { notify } = useToast();
@@ -106,13 +99,6 @@ function LandingContent() {
       filesRef.current = [...filesRef.current, ...additions];
       setFiles(filesRef.current);
     },
-    [notify],
-  );
-  useEffect(
-    () =>
-      attachUploadBrowserEvents((message) =>
-        notify({ message, tone: 'error' }),
-      ),
     [notify],
   );
   useEffect(
@@ -229,10 +215,16 @@ function LandingContent() {
         aspect,
         ...(duration ? { durationHint: duration } : {}),
       });
+      const preserved = {
+        ...session,
+        prompt: prompt.trim() ? prompt : session.prompt,
+      };
+      persistSession(preserved);
+      useUploads.setState({ session: preserved });
       try {
-        useSession.getState().save(session);
+        useSession.getState().save(preserved);
       } catch {
-        useSession.setState({ draft: session });
+        useSession.setState({ draft: preserved });
       }
       await new Promise((resolve) =>
         setTimeout(resolve, (reduced ? durations.d3 : durations.d5) * 1000),

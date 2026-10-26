@@ -13,7 +13,7 @@
     "build": "pnpm --filter @kimo/web build",
     "e2e": "playwright test --grep-invert screenshots",
     "shots": "playwright test e2e/screenshots.spec.ts",
-    "postinstall": "node scripts/fixtures.mjs"
+    "postinstall": "node scripts/grain.mjs && node scripts/fixtures.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",

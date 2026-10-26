@@ -35,6 +35,23 @@ export function WarmupReel({
   const pattern = useId().replaceAll(':', '');
   const reel = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    if (!unfolding || reduced) return;
+    const root = reel.current;
+    const bars = root?.querySelector('.warmup-bars')?.getBoundingClientRect();
+    const target = document
+      .querySelector('.warmup-header .brand svg')
+      ?.getBoundingClientRect();
+    if (!root || !bars || !target) return;
+    root.style.setProperty(
+      '--bars-flight-x',
+      `${target.left + target.width / 2 - bars.left - bars.width / 2}px`,
+    );
+    root.style.setProperty(
+      '--bars-flight-y',
+      `${target.top + target.height / 2 - bars.top - bars.height / 2}px`,
+    );
+  }, [unfolding, reduced]);
+  useEffect(() => {
     if (reduced || unfolding || !assets.length) return;
     let frame = 0;
     const previous = new Map<Element, number>();

@@ -97,7 +97,11 @@ function Gallery() {
   const [quality, setQuality] = React.useState('original');
   const [slider, setSlider] = React.useState([50]);
   return (
-    <main className="ui-demo" data-paused={paused || undefined}>
+    <main
+      className="ui-demo"
+      data-ready="true"
+      data-paused={paused || undefined}
+    >
       <a href="#ui-components" className="ui-demo-skip">
         Skip to components
       </a>

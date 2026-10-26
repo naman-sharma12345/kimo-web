@@ -4,7 +4,7 @@ Phases 0 through 4 of the supplied specification. Future Studio, rendering UI an
 
 ## Run
 
-Node 22+ and pnpm 9.x. `corepack prepare pnpm@9.15.9 --activate`, `pnpm install`, `pnpm mock` (8787), and in another terminal `pnpm dev` (3000). Copy `.env.example` to `apps/web/.env.local` if needed. `pnpm mock:demo` prints a real scripted WebSocket session.
+Node 22+, pnpm 9.x and FFmpeg on PATH for synthetic mock fixtures. `corepack prepare pnpm@9.15.9 --activate`, `pnpm install`, `pnpm mock` (8787), and in another terminal `pnpm dev` (3000). Copy `.env.example` to `apps/web/.env.local` if needed. `pnpm mock:demo` prints a real scripted WebSocket session.
 
 ## Check
 

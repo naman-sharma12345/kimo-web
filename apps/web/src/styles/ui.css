@@ -422,6 +422,8 @@
 }
 .ui-menu-item:is([data-highlighted], [data-state='hover']) {
   background: var(--ink-3);
+}
+.ui-menu-item:focus-visible {
   box-shadow: var(--focus-ring);
 }
 .ui-menu-item[data-disabled] {
@@ -698,6 +700,9 @@
   background: var(--cream-100);
   border-radius: var(--r-pill);
   box-shadow: 0 0 0 var(--space-4) var(--ink-1);
+}
+.ui-slider-thumb:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 .ui-slider[data-disabled] .ui-slider-thumb {
   background: var(--cream-16);

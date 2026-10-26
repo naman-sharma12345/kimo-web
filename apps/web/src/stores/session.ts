@@ -12,13 +12,19 @@ export const useSession = create<{
 }>((set) => ({
   draft: null,
   save: (draft) => {
-    sessionStorage.setItem('kimo-session', JSON.stringify(draft));
     set({ draft });
+    try {
+      if (typeof sessionStorage !== 'undefined')
+        sessionStorage.setItem('kimo-session', JSON.stringify(draft));
+    } catch {
+      // Restricted storage cannot invalidate an accepted live session.
+    }
   },
   restore: () => {
-    const raw = sessionStorage.getItem('kimo-session');
-    if (!raw) return null;
     try {
+      if (typeof sessionStorage === 'undefined') return null;
+      const raw = sessionStorage.getItem('kimo-session');
+      if (!raw) return null;
       const value: unknown = JSON.parse(raw);
       if (
         typeof value === 'object' &&

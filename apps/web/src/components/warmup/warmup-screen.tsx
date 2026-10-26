@@ -18,8 +18,9 @@ import { BrandMark } from '@/components/landing/brand';
 import { api } from '@/lib/api';
 import { useSession } from '@/stores/session';
 import { useProject } from '@/stores/project';
-import { attachUploadBrowserEvents, useUploads } from '@/lib/uploads';
+import { useUploads } from '@/lib/uploads';
 import { WarmupReel, type ReelAsset } from './warmup-reel';
+import { FullScreenError } from './full-screen-error';
 import {
   aggregateUploadProgress,
   initialWarmupState,
@@ -63,7 +64,6 @@ export function WarmupScreen({ sessionId }: { sessionId: string }) {
       : 1;
   const failed = items.filter((item) => item.status === 'error');
   const noticed = state.noticed || fallback;
-  useEffect(() => attachUploadBrowserEvents(), []);
   const reelAssets: ReelAsset[] = items.length
     ? items.map((item) => ({
         id: item.assetId ?? item.localId,
@@ -269,20 +269,12 @@ export function WarmupScreen({ sessionId }: { sessionId: string }) {
   }
   if (state.error)
     return (
-      <main className="warmup-screen warmup-error">
-        <div className="film-grain" aria-hidden="true" />
-        <h1>couldn’t start this session</h1>
-        <p>your files are still here. try again.</p>
-        <p className="warmup-error-detail">{state.error}</p>
-        <div>
-          <Button onClick={() => setRetry((value) => value + 1)}>
-            try again
-          </Button>
-          <Button variant="ghost" onClick={() => router.replace('/')}>
-            back to home
-          </Button>
-        </div>
-      </main>
+      <FullScreenError
+        variant="session"
+        detail={state.error}
+        onRetry={() => setRetry((value) => value + 1)}
+        onBack={() => router.replace('/')}
+      />
     );
   const current = warmupSteps.indexOf(state.step);
   return (

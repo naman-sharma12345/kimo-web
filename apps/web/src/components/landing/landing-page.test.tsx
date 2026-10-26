@@ -2,6 +2,7 @@ import * as React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LandingPage } from './landing-page';
+import { ToastProvider } from '@/components/ui/toast';
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
   startSession: vi.fn(),
@@ -11,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mocks.push }) }));
 vi.mock('@/lib/uploads', () => ({
-  attachUploadBrowserEvents: () => () => undefined,
+  persistSession: vi.fn(),
   useUploads: Object.assign(() => [], {
     getState: () => ({
       items: [],
@@ -38,7 +39,11 @@ beforeEach(() => {
 });
 describe('landing interactions', () => {
   it('sample chips fill but do not send', () => {
-    render(<LandingPage />);
+    render(
+      <ToastProvider>
+        <LandingPage />
+      </ToastProvider>,
+    );
     fireEvent.click(screen.getByRole('button', { name: 'podcast to shorts' }));
     expect(
       screen.getByRole('textbox', { name: 'describe your video' }),
@@ -46,7 +51,11 @@ describe('landing interactions', () => {
     expect(mocks.startSession).not.toHaveBeenCalled();
   });
   it('Shift+Enter does not send, Enter creates once, and failure retains text', async () => {
-    render(<LandingPage />);
+    render(
+      <ToastProvider>
+        <LandingPage />
+      </ToastProvider>,
+    );
     const editor = screen.getByRole('textbox', { name: 'describe your video' });
     fireEvent.change(editor, { target: { value: 'keep my prompt' } });
     fireEvent.keyDown(editor, { key: 'Enter', shiftKey: true });
@@ -62,7 +71,11 @@ describe('landing interactions', () => {
     expect(editor).toHaveValue('keep my prompt');
   });
   it('unsupported attachments are rejected before the manager receives them', async () => {
-    render(<LandingPage />);
+    render(
+      <ToastProvider>
+        <LandingPage />
+      </ToastProvider>,
+    );
     const picker = screen.getByLabelText('attach files', { selector: 'input' });
     fireEvent.change(picker, {
       target: {

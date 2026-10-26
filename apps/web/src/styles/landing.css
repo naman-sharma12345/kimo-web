@@ -588,3 +588,12 @@
     opacity: 0.7;
   }
 }
+
+.horizon-glow {
+  transition:
+    opacity var(--dur-5) var(--ease-out),
+    transform var(--dur-5) var(--ease-out);
+}
+.landing-page[data-sending] .horizon-glow {
+  animation: none;
+}

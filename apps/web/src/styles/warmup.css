@@ -407,3 +407,114 @@
   justify-content: center;
   transform: none;
 }
+
+.warmup-screen[data-unfolding] .warmup-bars {
+  opacity: 1;
+  animation: bars-fly var(--unfold) var(--ease-out) both;
+}
+@keyframes bars-fly {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    transform: translate(var(--bars-flight-x, 0px), var(--bars-flight-y, 0px))
+      scale(0.25, 0.4);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .warmup-screen[data-unfolding] .warmup-bars {
+    animation: none !important;
+    opacity: 0;
+  }
+}
+/* Phase 3 REST restore/error boundaries use the existing phase-specific scene. */
+.session-error-screen {
+  --session-error-width: 440px;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-24);
+  text-align: center;
+  background: var(--ink-0);
+}
+.session-error-screen > section {
+  max-width: var(--session-error-width);
+}
+.session-error-icon {
+  width: var(--space-20);
+  height: var(--space-20);
+  color: var(--error);
+  margin-bottom: var(--space-16);
+}
+.session-error-screen h1 {
+  font-size: var(--t-20);
+  line-height: var(--leading-20);
+  color: var(--cream-100);
+}
+.session-error-screen p {
+  font-size: var(--t-13);
+  line-height: var(--leading-13);
+  color: var(--cream-60);
+  margin-top: var(--space-8);
+}
+.session-error-screen .session-error-detail {
+  font-family: var(--font-mono);
+  font-size: var(--t-12);
+  color: var(--cream-38);
+  overflow-wrap: anywhere;
+}
+.session-error-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-8);
+  margin-top: var(--space-24);
+}
+.studio-restore-boundary {
+  --restore-width: 560px;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-24);
+  background: var(--ink-0);
+}
+.studio-restore-boundary > section {
+  width: min(100%, var(--restore-width));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+  align-items: flex-start;
+}
+.studio-restore-boundary h1 {
+  font-size: var(--t-20);
+  line-height: var(--leading-20);
+}
+.studio-restore-boundary p {
+  color: var(--cream-60);
+  font-size: var(--t-13);
+  overflow-wrap: anywhere;
+}
+.studio-restore-boundary .mono {
+  font-size: var(--t-12);
+  color: var(--cream-38);
+}
+.studio-original-message {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--r-12);
+  padding: var(--space-16);
+  background: var(--ink-1);
+}
+.studio-original-message h2 {
+  font-size: var(--t-11);
+  color: var(--cream-38);
+  margin-bottom: var(--space-8);
+}
+.studio-original-message p {
+  white-space: pre-wrap;
+}
+.studio-restored-assets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+  width: 100%;
+}
