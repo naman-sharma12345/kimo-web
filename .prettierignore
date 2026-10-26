@@ -1,0 +1,10 @@
+node_modules
+.next
+pnpm-lock.yaml
+.agents
+.codex
+skills-lock.json
+docs/DESIGN.md
+.mock-data
+test-results
+playwright-report

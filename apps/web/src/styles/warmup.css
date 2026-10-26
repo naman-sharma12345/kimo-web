@@ -1,0 +1,409 @@
+.warmup-screen {
+  --warmup-column: 560px;
+  --warmup-glow-width: 900px;
+  --warmup-glow-height: 420px;
+  --reel-width: 360px;
+  --reel-height: 120px;
+  --strip-height: 64px;
+  --tile-width: 96px;
+  --tile-height: 54px;
+  --playhead-height: 80px;
+  --playhead-width: 7px;
+  --bar-width: 10px;
+  --bar-max: 40px;
+  --steps-width: 320px;
+  --row-height: 28px;
+  --icon-size: 16px;
+  --status-gap: 10px;
+  --noticed-width: 520px;
+  --hole-color: rgb(245 241 231 / 0.08);
+  --reel-brighten: 400ms;
+  --unfold: 900ms;
+  --wave: 900ms;
+  --check: 260ms;
+  --unfold-drop: 35dvh;
+  --grain-opacity: 0.035;
+  min-height: 100dvh;
+  background: var(--ink-0);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+.warmup-screen .film-grain {
+  position: fixed;
+  inset: 0;
+  background-image: url('/grain.png');
+  opacity: var(--grain-opacity);
+  mix-blend-mode: overlay;
+  pointer-events: none;
+  z-index: 10;
+}
+.warmup-header {
+  position: absolute;
+  top: var(--space-24);
+  left: var(--space-24);
+  right: var(--space-24);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 2;
+}
+.warmup-header .brand {
+  font-size: var(--t-13);
+}
+.warmup-header .brand svg {
+  width: var(--space-16);
+  height: var(--space-16);
+}
+.warmup-glow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--warmup-glow-width);
+  height: var(--warmup-glow-height);
+  transform: translate(-50%, -50%);
+  background: radial-gradient(
+    closest-side,
+    rgb(255 90 36 / 0.1),
+    rgb(255 90 36 / 0.03) 55%,
+    transparent 100%
+  );
+  filter: blur(var(--space-40));
+  pointer-events: none;
+  transition: opacity var(--dur-5) var(--ease-out);
+}
+.warmup-center {
+  width: min(var(--warmup-column), calc(100vw - var(--space-32)));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 1;
+}
+.warmup-reel {
+  width: var(--reel-width);
+  max-width: 100%;
+  height: var(--reel-height);
+  position: relative;
+  view-transition-name: session-center;
+}
+.warmup-filmstrip {
+  position: absolute;
+  top: 0;
+  width: 100%;
+  height: var(--strip-height);
+  background: var(--ink-1);
+  border-radius: var(--r-12);
+  overflow: hidden;
+  transition:
+    width var(--unfold) var(--ease-out),
+    transform var(--unfold) var(--ease-out);
+}
+.warmup-filmstrip-track {
+  display: flex;
+  width: max-content;
+  height: 100%;
+  animation: reel-scroll var(--reel-duration) linear infinite;
+}
+.warmup-filmstrip-copy {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding-right: var(--space-6);
+}
+.warmup-thumbnail {
+  width: var(--tile-width);
+  height: var(--tile-height);
+  border-radius: var(--r-6);
+  background: var(--ink-2);
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: var(--cream-38);
+}
+.warmup-thumbnail > svg {
+  max-width: 100%;
+  max-height: 100%;
+}
+.warmup-thumbnail > svg:not([viewBox='0 0 96 54']) {
+  width: var(--space-20);
+  height: var(--space-20);
+}
+.warmup-thumbnail[data-empty] {
+  animation: empty-shimmer var(--wave) var(--ease-in-out) alternate infinite;
+}
+.warmup-sprockets {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  color: var(--hole-color);
+  pointer-events: none;
+  width: calc(100% + var(--reel-distance));
+  animation: reel-scroll var(--reel-duration) linear infinite;
+}
+.warmup-playhead {
+  position: absolute;
+  left: 50%;
+  top: calc(-1 * var(--space-8));
+  transform: translateX(-50%);
+  width: var(--playhead-width);
+  height: var(--playhead-height);
+  color: var(--orange);
+  view-transition-name: timeline-playhead;
+}
+.warmup-bars {
+  position: absolute;
+  top: calc(var(--strip-height) + var(--space-16));
+  left: 50%;
+  transform: translateX(-50%);
+  height: var(--bar-max);
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-8);
+  view-transition-name: warmup-brand;
+}
+.warmup-bars i {
+  display: block;
+  width: var(--bar-width);
+  background: var(--cream-100);
+  opacity: 0.85;
+  border-radius: var(--r-pill);
+}
+.warmup-steps {
+  padding: 0;
+  margin: var(--space-40) 0 0;
+  width: min(var(--steps-width), 100%);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+.warmup-steps li {
+  height: var(--row-height);
+  display: flex;
+  align-items: center;
+  gap: var(--status-gap);
+  font-size: var(--t-13);
+  color: var(--cream-38);
+  transition: color var(--dur-3);
+}
+.warmup-steps li[data-status='done'] {
+  color: var(--cream-60);
+}
+.warmup-steps li[data-status='active'] {
+  color: var(--cream-100);
+}
+.warmup-step-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  flex: none;
+}
+.warmup-step-icon > i {
+  width: var(--space-6);
+  height: var(--space-6);
+  border-radius: var(--r-pill);
+  background: var(--cream-16);
+}
+.warmup-step-icon > svg {
+  width: 14px;
+  height: 14px;
+}
+.warmup-step-icon .ui-spinner {
+  color: var(--orange);
+}
+.warmup-steps li[data-status='done'] .warmup-step-icon svg {
+  stroke-dasharray: 40;
+  animation: check-draw var(--check) var(--ease-out) both;
+}
+.warmup-steps li[data-failed] {
+  color: var(--error);
+}
+.warmup-steps button {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  text-decoration: underline;
+  color: inherit;
+}
+.warmup-noticed {
+  margin-top: var(--space-24);
+  min-height: var(--space-40);
+  max-width: var(--noticed-width);
+  text-align: center;
+  color: var(--cream-60);
+  font-size: var(--t-13);
+  animation: warmup-fade var(--dur-3) var(--ease-out) both;
+}
+.warmup-noticed > i {
+  display: inline-block;
+  width: var(--space-4);
+  height: var(--space-4);
+  background: var(--orange);
+  border-radius: var(--r-pill);
+  margin-right: var(--space-8);
+  vertical-align: middle;
+  animation: noticed-blink var(--dur-3) both;
+}
+.warmup-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.warmup-bottom {
+  position: absolute;
+  bottom: var(--space-32);
+  left: var(--space-16);
+  right: var(--space-16);
+  text-align: center;
+  color: var(--cream-38);
+  font-size: var(--t-12);
+}
+.warmup-bottom[data-slow] {
+  color: var(--warning);
+  opacity: 0.8;
+}
+.warmup-screen[data-unfolding] .warmup-steps,
+.warmup-screen[data-unfolding] .warmup-noticed {
+  opacity: 0;
+  transition: opacity var(--dur-3);
+}
+.warmup-screen[data-unfolding] .warmup-filmstrip {
+  animation-play-state: paused;
+  width: 100vw;
+  transform: translateX(calc((var(--reel-width) - 100vw) / 2))
+    translateY(var(--unfold-drop));
+}
+.warmup-screen[data-unfolding] .warmup-filmstrip-track {
+  animation-play-state: paused;
+}
+.warmup-screen[data-unfolding] .warmup-playhead {
+  transform: translateY(var(--unfold-drop));
+  transition: transform var(--unfold) var(--ease-out);
+}
+.warmup-screen[data-unfolding] .warmup-bars {
+  opacity: 0;
+  transition: opacity var(--unfold);
+}
+.warmup-error {
+  flex-direction: column;
+  gap: var(--space-16);
+  padding: var(--space-24);
+  text-align: center;
+}
+.warmup-error h1 {
+  font-size: var(--t-28);
+}
+.warmup-error > p {
+  color: var(--cream-60);
+}
+.warmup-error .warmup-error-detail {
+  font-size: var(--t-12);
+  font-family: var(--font-mono);
+  color: var(--cream-38);
+  max-width: var(--warmup-column);
+  overflow-wrap: anywhere;
+}
+.warmup-error > div:last-child {
+  display: flex;
+  gap: var(--space-8);
+}
+@keyframes reel-scroll {
+  to {
+    transform: translateX(calc(-1 * var(--reel-distance)));
+  }
+}
+@keyframes sprocket-scroll {
+  to {
+    background-position: calc(-1 * var(--reel-distance)) 0;
+  }
+}
+@keyframes reel-watched {
+  0%,
+  2%,
+  100% {
+    filter: brightness(1);
+  }
+  1% {
+    filter: brightness(1.25);
+  }
+}
+@keyframes empty-shimmer {
+  from {
+    opacity: 0.5;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes check-draw {
+  from {
+    stroke-dashoffset: 40;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes warmup-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes noticed-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+@media (max-width: 640px) {
+  .warmup-header {
+    top: var(--space-16);
+    left: var(--space-16);
+    right: var(--space-16);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .warmup-screen *,
+  .warmup-screen *::before {
+    animation: none !important;
+    transition: opacity var(--dur-3) !important;
+  }
+  .warmup-filmstrip-track {
+    transform: none;
+  }
+  .warmup-screen[data-unfolding] .warmup-filmstrip {
+    transform: none;
+    width: 100%;
+    opacity: 0;
+  }
+  .warmup-screen[data-unfolding] .warmup-playhead {
+    transform: translateX(-50%);
+    opacity: 0;
+  }
+  .warmup-noticed {
+    animation: warmup-fade var(--dur-3) !important;
+  }
+}
+
+/* Centering is layout, so Motion's scale transform cannot replace it. */
+.warmup-bars {
+  left: 0;
+  right: 0;
+  justify-content: center;
+  transform: none;
+}

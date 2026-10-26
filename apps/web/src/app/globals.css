@@ -1,0 +1,131 @@
+@import 'tailwindcss';
+@import '../styles/tokens.css';
+@font-face {
+  font-family: 'Instrument Serif';
+  src: url('/fonts/instrument-serif-italic.ttf') format('truetype');
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+}
+:root {
+  color-scheme: dark;
+  --font-sans: var(--font-geist-sans), 'Geist', ui-sans-serif, system-ui;
+  --font-mono: var(--font-geist-mono), 'Geist Mono', ui-monospace;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--ink-0);
+  color: var(--cream-100);
+  font-family: var(--font-sans);
+  font-size: var(--t-13);
+  line-height: var(--leading-13);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+  font-weight: 400;
+}
+button,
+input,
+textarea {
+  font: inherit;
+}
+button,
+a,
+input,
+textarea,
+[tabindex] {
+  outline: none;
+}
+:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: not-allowed;
+}
+.mono {
+  font-family: var(--font-mono);
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  letter-spacing: -0.02em;
+  font-weight: 500;
+}
+.brand svg {
+  width: var(--space-20);
+  height: var(--space-20);
+}
+.dev-page {
+  padding: var(--space-32);
+  max-width: 1200px;
+  margin: auto;
+}
+.dev-page h1 {
+  font-size: var(--t-28);
+  margin-bottom: var(--space-32);
+}
+.dev-section {
+  margin-bottom: var(--space-32);
+}
+.dev-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-16);
+}
+.token-swatch {
+  width: var(--space-96);
+  height: var(--space-64);
+  border-radius: var(--r-4);
+  border: 1px solid var(--line-strong);
+}
+.token-label {
+  font-family: var(--font-mono);
+  font-size: var(--t-12);
+  color: var(--cream-60);
+  max-width: var(--space-128);
+  overflow-wrap: anywhere;
+}
+.motion-track {
+  width: var(--space-128);
+  padding: var(--space-8);
+}
+.motion-square {
+  width: var(--space-24);
+  height: var(--space-24);
+  background: var(--cream-100);
+  animation: token-move var(--demo-duration) var(--demo-ease) both;
+}
+@keyframes token-move {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(64px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+  }
+  .motion-square {
+    animation: none;
+  }
+}

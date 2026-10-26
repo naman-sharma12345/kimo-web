@@ -1,0 +1,10 @@
+{
+  "name": "@kimo/compositor",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {},
+  "dependencies": {
+    "pixi.js": "^8.8.0"
+  }
+}
