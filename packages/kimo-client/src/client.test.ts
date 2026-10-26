@@ -32,6 +32,34 @@ const snapshot = (version: number) => ({
   project: { ...sampleProject, version },
 });
 describe('client recovery', () => {
+  it('binds the default browser fetch receiver for reads and writes', async () => {
+    const browserFetch = vi.fn(function (
+      this: unknown,
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation');
+      return Promise.resolve(
+        init?.method === 'POST'
+          ? new Response(null, { status: 202 })
+          : new Response(JSON.stringify(snapshot(0))),
+      );
+    });
+    vi.stubGlobal('fetch', browserFetch);
+    try {
+      const client = new KimoClient('http://mock');
+      await expect(client.session('s')).resolves.toMatchObject({
+        status: 'editing',
+      });
+      await expect(
+        client.message('s', 'make this shorter'),
+      ).resolves.toBeUndefined();
+      expect(browserFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('encodes session IDs and validates requests before sending', async () => {
     const request = vi
       .fn<typeof fetch>()

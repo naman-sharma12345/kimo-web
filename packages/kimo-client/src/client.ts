@@ -13,7 +13,7 @@ export class ApiError extends Error {
 export class KimoClient {
   constructor(
     public base = 'http://localhost:8787',
-    private request: typeof fetch = fetch,
+    private request: typeof fetch = globalThis.fetch.bind(globalThis),
   ) {}
   private async json<T>(
     path: string,
