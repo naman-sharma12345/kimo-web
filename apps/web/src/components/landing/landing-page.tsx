@@ -1,5 +1,6 @@
 'use client';
 import * as React from 'react';
+import { diagnosticsTiming, attachmentCounts } from '@/lib/diagnostics';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -50,11 +51,36 @@ interface LocalAttachment {
   id: string;
   preview?: string;
 }
-export function LandingPage() {
+export interface LandingPageProps {
+  initialPrompt?: string;
+  initialFiles?: File[];
+  initialSignIn?: boolean;
+  activated?: boolean;
+  initialSend?: boolean;
+  initialControl?: string;
+  initialErrors?: string[];
+  initialFocus?: {
+    name: string;
+    start: number;
+    end: number;
+    direction: 'forward' | 'backward' | 'none';
+    scrollTop: number;
+  };
+}
+export function LandingPage({
+  initialPrompt = '',
+  initialFiles = [],
+  initialSignIn = false,
+  activated = false,
+  initialSend = false,
+  initialFocus,
+  initialControl,
+  initialErrors = [],
+}: LandingPageProps = {}) {
   const router = useRouter();
   const reduced = useReducedMotion();
   const { notify } = useToast();
-  const [prompt, setPrompt] = useState('');
+  const [prompt, setPrompt] = useState(initialPrompt);
   const [files, setFiles] = useState<LocalAttachment[]>(() =>
     useUploads
       .getState()
@@ -63,13 +89,13 @@ export function LandingPage() {
   const [aspect, setAspect] = useState<Aspect>('auto');
   const [duration, setDuration] = useState<number>();
   const [focused, setFocused] = useState(false);
-  const [hasInteracted, setHasInteracted] = useState(false);
-  const [composerEntered, setComposerEntered] = useState(false);
+  const [hasInteracted, setHasInteracted] = useState(activated);
+  const [composerEntered, setComposerEntered] = useState(activated);
   const [placeholder, setPlaceholder] = useState(0);
   const [placeholderFading, setPlaceholderFading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [sending, setSending] = useState(false);
-  const [signIn, setSignIn] = useState(false);
+  const [signIn, setSignIn] = useState(initialSignIn);
   const input = useRef<HTMLInputElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
@@ -113,16 +139,25 @@ export function LandingPage() {
   );
   useEffect(
     () => () => {
-      filesRef.current.forEach((item) => {
-        if (item.preview) URL.revokeObjectURL(item.preview);
+      const owned = filesRef.current;
+      // StrictMode replays effect setup/cleanup without discarding this tree.
+      // Revoke only after a real unmount, not the activation rehearsal.
+      void Promise.resolve().then(() => {
+        if (mounted.current) return;
+        owned.forEach((item) => {
+          if (item.preview) URL.revokeObjectURL(item.preview);
+        });
       });
     },
     [],
   );
   useEffect(() => {
-    if (matchMedia('(pointer:fine) and (min-width:641px)').matches)
+    if (
+      !activated &&
+      matchMedia('(pointer:fine) and (min-width:641px)').matches
+    )
       textarea.current?.focus();
-  }, []);
+  }, [activated]);
   useEffect(() => {
     if (hasInteracted || prompt || reduced) {
       setPlaceholderFading(false);
@@ -141,7 +176,7 @@ export function LandingPage() {
       clearTimeout(fadeTimer);
     };
   }, [hasInteracted, prompt, reduced]);
-  useEffect(() => {
+  React.useLayoutEffect(() => {
     const node = textarea.current;
     if (node) {
       node.style.height = 'auto';
@@ -198,6 +233,56 @@ export function LandingPage() {
       window.removeEventListener('paste', paste);
     };
   }, [attach]);
+  const initialized = useRef(false);
+  React.useLayoutEffect(() => {
+    if (initialized.current) return;
+    initialized.current = true;
+    if (initialFiles.length) attach(initialFiles);
+    initialErrors.forEach((message) => notify({ message, tone: 'error' }));
+  }, [attach, initialFiles, initialErrors, notify]);
+  const restoredFocus = useRef(false);
+  React.useLayoutEffect(() => {
+    if (!activated || restoredFocus.current) return;
+    restoredFocus.current = true;
+    const root = composerRef.current?.closest('.landing-page');
+    const buttons = Array.from(
+      root?.querySelectorAll<HTMLElement>('button, a') ?? [],
+    );
+    const named = (name: string) =>
+      buttons.find(
+        (button) =>
+          (button.getAttribute('aria-label') ?? button.textContent) === name,
+      );
+    if (initialFocus?.name === 'describe your video' && textarea.current) {
+      textarea.current.focus({ preventScroll: true });
+      textarea.current.setSelectionRange(
+        initialFocus.start,
+        initialFocus.end,
+        initialFocus.direction,
+      );
+      textarea.current.scrollTop = initialFocus.scrollTop;
+    } else if (initialFocus)
+      named(initialFocus.name)?.focus({ preventScroll: true });
+    if (initialControl) {
+      const trigger = named(initialControl);
+      if (initialControl === 'video settings') trigger?.click();
+      else
+        trigger?.dispatchEvent(
+          new window.KeyboardEvent('keydown', {
+            key: 'Enter',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+    }
+  }, [activated, initialFocus, initialControl]);
+  const handedOffSend = useRef(false);
+  useEffect(() => {
+    if (!initialSend || handedOffSend.current) return;
+    if (initialFiles.length && !files.length && filesRef.current.length) return;
+    handedOffSend.current = true;
+    void send();
+  });
   async function send() {
     if (inFlight.current || (!prompt.trim() && !files.length)) return;
     inFlight.current = true;
@@ -220,11 +305,18 @@ export function LandingPage() {
         useUploads.setState({ session: undefined });
         sessionStarted.current = true;
       }
+      const promptObservation = !useUploads.getState().session
+        ? diagnosticsTiming.beginPrompt({
+            length: text.length,
+            file_counts: attachmentCounts(files.map((item) => item.file)),
+          })
+        : undefined;
       const session = await useUploads.getState().startSession({
         prompt: text,
         aspect,
         ...(duration ? { durationHint: duration } : {}),
       });
+      promptObservation?.bind(session.sessionId);
       const preserved = {
         ...session,
         prompt: prompt.trim() ? prompt : session.prompt,
@@ -266,6 +358,7 @@ export function LandingPage() {
     <div
       className="landing-page"
       data-ready="true"
+      data-activated={activated || undefined}
       data-sending={sending || undefined}
       data-focused={focused || undefined}
       data-typing={!!prompt || undefined}
@@ -309,7 +402,13 @@ export function LandingPage() {
             <div className="horizon-glow" aria-hidden="true" />
             <motion.div
               ref={composerRef}
-              initial={reduced ? { opacity: 0 } : { opacity: 0, scale: 0.98 }}
+              initial={
+                activated
+                  ? false
+                  : reduced
+                    ? { opacity: 0 }
+                    : { opacity: 0, scale: 0.98 }
+              }
               animate={
                 reduced
                   ? { opacity: sending ? 0 : 1, scale: 1 }
@@ -364,7 +463,11 @@ export function LandingPage() {
                     <motion.div
                       key={item.id}
                       initial={
-                        reduced ? { opacity: 0 } : { opacity: 0, scale: 0.9 }
+                        activated && initialFiles.includes(item.file)
+                          ? false
+                          : reduced
+                            ? { opacity: 0 }
+                            : { opacity: 0, scale: 0.9 }
                       }
                       animate={{ opacity: 1, scale: 1 }}
                       transition={
@@ -479,6 +582,10 @@ export function LandingPage() {
               </button>
             ))}
           </div>
+          <p className="landing-privacy">
+            by sending, you agree that your files are processed by ai models.
+            don’t upload anything private. <Link href="/privacy">privacy</Link>
+          </p>
         </section>
         <section id="how-it-works" className="how-it-works">
           <h2>how it works</h2>

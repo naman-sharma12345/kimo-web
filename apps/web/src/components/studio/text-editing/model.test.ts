@@ -4,8 +4,8 @@ import { setupText } from './test-helpers';
 afterEach(() => vi.useRealTimers());
 describe('single-authority shared text model', () => {
   it('shares pending value, previews at150ms without advancing authority and sends one group at800ms then blur once', async () => {
+    const { editing, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, ops } = setupText();
     const model = getTextEditModel(editing, 't');
     const off = model.subscribe(() => undefined);
     expect(getTextEditModel(editing, 't')).toBe(model);
@@ -31,8 +31,8 @@ describe('single-authority shared text model', () => {
     editing.dispose();
   });
   it('focusout before debounce sends once and unmount cancels all pending callbacks', async () => {
+    const { editing, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, ops } = setupText();
     const model = getTextEditModel(editing, 't');
     const off = model.subscribe(() => undefined);
     model.change('content', 'changed', 'viewer');
@@ -48,8 +48,8 @@ describe('single-authority shared text model', () => {
     editing.dispose();
   });
   it('IME pauses both timers until compositionend and secondary changes share one text.update', async () => {
+    const { editing, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, ops } = setupText();
     const model = getTextEditModel(editing, 't');
     const off = model.subscribe(() => undefined);
     model.composition(true);
@@ -72,8 +72,8 @@ describe('single-authority shared text model', () => {
     editing.dispose();
   });
   it('accepts external updates when inactive; deletion cancels draft, timers and core selection/toast', async () => {
+    const { editing, ops, toast, selectionRemoved } = await setupText();
     vi.useFakeTimers();
-    const { editing, ops, toast, selectionRemoved } = setupText();
     const model = getTextEditModel(editing, 't');
     const off = model.subscribe(() => undefined);
     await editing.receiveAuthoritative({
@@ -102,8 +102,8 @@ describe('single-authority shared text model', () => {
   it.each(['use it', 'keep mine'] as const)(
     'resolves queued suggestion explicitly: %s',
     async (choice) => {
+      const { editing, ops } = await setupText();
       vi.useFakeTimers();
-      const { editing, ops } = setupText();
       const model = getTextEditModel(editing, 't');
       const off = model.subscribe(() => undefined);
       model.change('content', 'unflushed mine', 'inspector');
@@ -126,9 +126,9 @@ describe('single-authority shared text model', () => {
     },
   );
   it('disposal aborts scheduled edits and a distinct session cannot see prior draft', async () => {
+    const first = await setupText();
+    const second = await setupText();
     vi.useFakeTimers();
-    const first = setupText();
-    const second = setupText();
     const model = getTextEditModel(first.editing, 't');
     const off = model.subscribe(() => undefined);
     model.change('content', 'old', 'inspector');
@@ -145,8 +145,8 @@ describe('single-authority shared text model', () => {
 
 describe('idle and collision races', () => {
   it('idle creates one logical group, retains softlock and later typing gets a second group, never keystroke groups', async () => {
+    const { editing, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, ops } = setupText();
     const model = getTextEditModel(editing, 't');
     const off = model.subscribe(() => undefined);
     model.change('content', 'first', 'inspector');
@@ -164,8 +164,8 @@ describe('idle and collision races', () => {
     editing.dispose();
   });
   it('unresolved AI collision cannot silently expire through the idle commit timer', async () => {
+    const { editing, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, ops } = setupText();
     const model = getTextEditModel(editing, 't');
     const off = model.subscribe(() => undefined);
     model.change('content', 'mine', 'inspector');

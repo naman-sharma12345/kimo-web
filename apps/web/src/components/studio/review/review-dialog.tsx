@@ -13,6 +13,8 @@ import { Toggle } from '@/components/ui/toggle';
 import { isCaptionClip } from '../text-editing/caption-commands';
 import type { StudioCompositorHandle } from '../compositor-bridge';
 import styles from './review.module.css';
+import { ExportOptions } from '../finish';
+import { exportAvailable, type ExportSelection } from '@/lib/studio-finish';
 
 export type PosterResult = Awaited<
   ReturnType<NonNullable<StudioCompositorHandle['getFrame']>>
@@ -70,6 +72,14 @@ function ReviewContent({
   onRender,
   onPoster,
 }: ReviewDialogProps) {
+  const [exportSelection, setExportSelection] = React.useState<ExportSelection>(
+    { resolution: '1080p', format: 'mp4', alsoPortrait: false },
+  );
+  const exportCapabilities = {
+    resolution720: false,
+    webm: false,
+    dualPortrait: false,
+  };
   const hasCaptions = Object.values(project.clips).some(isCaptionClip);
   const [burnInCaptions, setBurnInCaptions] = React.useState(hasCaptions);
   const [poster, setPoster] = React.useState<string | null>(null);
@@ -155,6 +165,12 @@ function ReviewContent({
           />
         }
       />
+      <ExportOptions
+        value={exportSelection}
+        onChange={setExportSelection}
+        capabilities={exportCapabilities}
+        disabled={pending}
+      />
       <DialogActions>
         <Button disabled={pending} onClick={onKeepEditing}>
           keep editing
@@ -164,6 +180,7 @@ function ReviewContent({
           disabled={!ready || !title.trim()}
           loading={pending}
           onClick={() =>
+            exportAvailable(exportSelection, exportCapabilities) &&
             onRender({
               burnInCaptions,
               expectedProjectVersion: project.version,

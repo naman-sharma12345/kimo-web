@@ -49,6 +49,7 @@ export function route(raw: string, method = 'GET') {
       (method === 'PUT' && new RegExp(`^/mock-r2/${id}(/\\d+)?$`).test(target))
     : read &&
       (target === '/' ||
+        target === '/privacy' ||
         new RegExp(`^/(warmup|studio|render|v)/${id}$`).test(target) ||
         /^\/_next\/static\/[a-zA-Z0-9_./[\]@()-]+$/.test(target) ||
         [

@@ -1,10 +1,33 @@
 'use client';
 import * as React from 'react';
+import { analytics, diagnosticsTiming, assetCounts } from '@/lib/diagnostics';
 import { useRouter } from 'next/navigation';
 import type { SessionSnapshot } from '@kimo/client';
 import { api } from '@/lib/api';
 import { useProject } from '@/stores/project';
 import { useEditing } from '@/stores/editing';
+import { createIndexedDBEditPersistence } from '@/lib/editing/indexeddb';
+import { createSessionRecovery, recoveryTiming } from '@/lib/session-recovery';
+import { sessionDestination } from '@/lib/uploads/session';
+import {
+  createCutStore,
+  cutPreviewState,
+  rememberPrompt,
+  type LocalCut,
+  type LocalStorage,
+  type BeatDetection,
+  projectBeats,
+} from '@/lib/studio-finish';
+import { createReadOnlyEditing } from '@/lib/studio-finish/readonly-editing';
+import {
+  CommandPalette,
+  CutsMenu,
+  CutPreviewBanner,
+  CompareControl,
+  ShortcutsCoachmarks,
+  BeatToggle,
+  type CoachStep,
+} from '@/components/studio/finish';
 import { TimelineEditor, type TimelineInlineTextProps } from './timeline';
 import { TimelineTextEditor, isCaptionClip } from './text-editing';
 import { InspectorEditor, type LevelMeterAPI } from './inspector';
@@ -94,6 +117,8 @@ export interface StudioShellProps {
   };
   /** Lets a later phase own the live subscription without opening a duplicate socket. */
   subscribe?: boolean;
+  /** Producer-detected source times only; absent means beat detection unavailable. */
+  beatDetections?: readonly BeatDetection[];
 }
 function TimelineTextAdapter({
   clip,
@@ -110,8 +135,9 @@ function TimelineTextAdapter({
 }
 const emptySlots: StudioSlots = {};
 const emptyCommands: NonNullable<StudioShellProps['commands']> = {};
+const emptyBeatDetections: readonly BeatDetection[] = [];
 export const studioTiming = {
-  reconnect: [1000, 2000, 5000],
+  reconnect: recoveryTiming.backoff,
   handshake: 5000,
 } as const;
 export function StudioShell({
@@ -123,20 +149,79 @@ export function StudioShell({
   compositorRef,
   commands = emptyCommands,
   subscribe = true,
+  beatDetections = emptyBeatDetections,
 }: StudioShellProps) {
   const router = useRouter();
   const state = useStudio();
-  const editingState = useEditing((s) => s.state);
-  const editingSession = useEditing((s) => s.session);
+  const liveEditingState = useEditing((s) => s.state);
+  const liveEditingSession = useEditing((s) => s.session);
+  const [previewCut, setPreviewCut] = React.useState<LocalCut | null>(null);
+  const previewCutRef = React.useRef<LocalCut | null>(null);
+  previewCutRef.current = previewCut;
+  const [cuts, setCuts] = React.useState<readonly LocalCut[]>([]);
+  const cutsStore = React.useRef<ReturnType<typeof createCutStore> | null>(
+    null,
+  );
+  const [localStorageAdapter, setLocalStorageAdapter] =
+    React.useState<LocalStorage>();
+  const [recentPrompts, setRecentPrompts] = React.useState<readonly string[]>(
+    [],
+  );
+  const [paletteOpen, setPaletteOpen] = React.useState(false);
+  const [beatGridEnabled, setBeatGridEnabled] = React.useState(false);
+  const [coachAnchors, setCoachAnchors] = React.useState<
+    Record<CoachStep, HTMLElement | null>
+  >({ agent: null, viewer: null, finish: null });
   const toasts = useOptionalToast();
   const toastRef = React.useRef(toasts);
   toastRef.current = toasts;
   const storedProject = useProject((s) => s.project);
-  const project =
+  const liveProject =
     storedProject?.id === snapshot.project.id
       ? storedProject
       : snapshot.project;
-  const [assets, setAssets] = React.useState(snapshot.assets);
+  const [liveAssets, setAssets] = React.useState(snapshot.assets);
+  const preview = React.useMemo(
+    () => (previewCut ? cutPreviewState(previewCut) : null),
+    [previewCut],
+  );
+  const project = preview?.project ?? liveProject;
+  const assets = preview?.assets ?? liveAssets;
+  const detectedBeats = React.useMemo(
+    () => projectBeats(project, beatDetections),
+    [project, beatDetections],
+  );
+  const editingSession = React.useMemo(
+    () =>
+      preview && liveEditingSession
+        ? createReadOnlyEditing(
+            liveEditingSession,
+            preview.project,
+            preview.assets,
+          )
+        : liveEditingSession,
+    [preview, liveEditingSession],
+  );
+  const editingState = preview
+    ? (editingSession?.getState() ?? liveEditingState)
+    : liveEditingState;
+  React.useEffect(() => {
+    let storage: LocalStorage | undefined;
+    try {
+      storage = window.localStorage;
+    } catch {
+      /* Session-only cuts remain explicit. */
+    }
+    const store = createCutStore(storage);
+    cutsStore.current = store;
+    setLocalStorageAdapter(storage);
+    setCuts(store.list(sessionId));
+    setRecentPrompts(rememberPrompt(storage, ''));
+    setPreviewCut(null);
+    return () => {
+      if (cutsStore.current === store) cutsStore.current = null;
+    };
+  }, [sessionId]);
   const rendererAssets = React.useMemo(
     () => (slots.viewer ? assets : withBuiltinAssets(assets)),
     [assets, slots.viewer],
@@ -204,7 +289,7 @@ export function StudioShell({
   const composer = React.useRef<HTMLTextAreaElement>(null);
   const agentComposer = React.useRef<AgentComposerHandle>(null);
   const assetsRef = React.useRef(assets);
-  assetsRef.current = assets;
+  assetsRef.current = liveAssets;
   const notificationRef = React.useRef<AgentNotificationController | null>(
     null,
   );
@@ -215,6 +300,7 @@ export function StudioShell({
   >([]);
   const viewer = React.useRef<HTMLElement>(null);
   const socket = React.useRef<WebSocket | null>(null);
+  const transportReady = React.useRef(false);
   const uploadLife = React.useRef<AbortController | null>(null);
   const agentController = React.useMemo(
     () =>
@@ -223,11 +309,46 @@ export function StudioShell({
         {
           assets: () => assetsRef.current,
           acting: () => useStudio.getState().agent === 'acting',
-          message: (text) => api.message(sessionId, text),
+          message: async (text) => {
+            const observation = diagnosticsTiming.beginPrompt({
+              length: text.length,
+              file_counts: assetCounts(
+                agentController
+                  .getSnapshot()
+                  .items.filter((item) => item.kind === 'user')
+                  .reverse()
+                  .find((item) => item.delivery === 'sending')?.attachments ??
+                  [],
+              ),
+            });
+            observation.bind(sessionId);
+            try {
+              await api.message(sessionId, text);
+            } catch (error) {
+              observation.cancel();
+              throw error;
+            }
+          },
           send: (packet) => {
             const current = socket.current;
             if (!current || current.readyState !== WebSocket.OPEN) return false;
             current.send(JSON.stringify(packet));
+            if (packet.t === 'interrupt') {
+              analytics.track('interrupt_sent', {});
+              diagnosticsTiming
+                .beginPrompt({
+                  length: packet.text.length,
+                  file_counts: assetCounts(
+                    agentController
+                      .getSnapshot()
+                      .items.filter((item) => item.kind === 'user')
+                      .reverse()
+                      .find((item) => item.delivery === 'sending')
+                      ?.attachments ?? [],
+                  ),
+                })
+                .bind(sessionId);
+            }
             return true;
           },
           userSent: () => notificationRef.current?.userSent(),
@@ -242,6 +363,9 @@ export function StudioShell({
     agentController.getSnapshot,
     agentController.getSnapshot,
   );
+  React.useEffect(() => {
+    agentController.restoreHistory(snapshot.agentHistory);
+  }, [agentController, snapshot.agentHistory]);
   const liveAgent = React.useRef(agentController);
   React.useEffect(() => {
     liveAgent.current = agentController;
@@ -273,6 +397,31 @@ export function StudioShell({
       ?.focus();
   };
 
+  const prepareCoachAnchor = React.useCallback((step: CoachStep) => {
+    if (step === 'agent') {
+      useStudio.setState({ agentCollapsed: false });
+      setAgentTab('chat');
+      setWatchTab('chat');
+    }
+  }, []);
+  React.useEffect(() => {
+    const next = {
+      agent: document.querySelector<HTMLElement>(
+        '[data-testid="studio-agent"]',
+      ),
+      viewer: document.querySelector<HTMLElement>(
+        '[data-testid="studio-viewer"]',
+      ),
+      finish: document.querySelector<HTMLElement>('.studio-finish'),
+    };
+    setCoachAnchors((old) =>
+      old.agent === next.agent &&
+      old.viewer === next.viewer &&
+      old.finish === next.finish
+        ? old
+        : next,
+    );
+  }, [viewport.width, state.agentCollapsed, state.inspectorCollapsed]);
   const defaultCompositor = React.useRef<StudioCompositorHandle | null>(null);
   const compositor = compositorRef ?? defaultCompositor;
   const reviewPoster = React.useRef<PosterResult | null>(null);
@@ -330,9 +479,18 @@ export function StudioShell({
       sessionId,
       project: snapshot.project,
       assets: snapshot.assets,
-      client: api,
+      client: {
+        session: (id, options) => api.session(id, options),
+        ops: async (id, ops, version, options) => {
+          const result = await api.ops(id, ops, version, options);
+          for (const op_type of new Set(ops.map((op) => op.op)))
+            analytics.track('user_edit', { op_type });
+          return result;
+        },
+      },
       storage,
-      online: () => navigator.onLine,
+      persistence: createIndexedDBEditPersistence(),
+      online: () => navigator.onLine && (!subscribe || transportReady.current),
       assetsChanged: (next) => setAssets([...next]),
       activity: (text) => {
         setActivity(text);
@@ -367,10 +525,13 @@ export function StudioShell({
         },
       },
     });
-    const flush = () => {
-      void edit.flush();
-    };
-    window.addEventListener('online', flush);
+    void edit.ready().then(() => {
+      if (
+        !uploadController.signal.aborted &&
+        (!subscribe || transportReady.current)
+      )
+        void edit.flush();
+    });
     setAssets(snapshot.assets);
     const resize = () =>
       setViewport({ width: window.innerWidth, height: window.innerHeight });
@@ -380,7 +541,6 @@ export function StudioShell({
       uploadController.abort();
       if (uploadLife.current === uploadController) uploadLife.current = null;
       window.removeEventListener('resize', resize);
-      window.removeEventListener('online', flush);
       if (useEditing.getState().session === edit)
         useProject.getState().dispose();
     };
@@ -398,197 +558,268 @@ export function StudioShell({
       useStudio.setState({ inspectorCollapsed: false });
   }, [state.selection]);
   React.useEffect(() => {
-    if (!subscribe || !snapshot.wsUrl) return;
+    transportReady.current = false;
+    if (!subscribe) return;
     let disposed = false;
-    let retries = 0;
-    let retryTimer: ReturnType<typeof setTimeout> | undefined;
-    let handshake: ReturnType<typeof setTimeout> | undefined;
-    let connection: WebSocket | undefined;
     let projectQueue: Promise<void> = Promise.resolve();
     const runningActions = new Set<string>();
-    const url = snapshot.wsUrl;
-    function retry() {
-      clearTimeout(handshake);
-      if (disposed) return;
-      useStudio.setState({ connection: 'reconnecting' });
-      agentController.connection(false);
-      const delay = studioTiming.reconnect[retries++];
-      if (delay === undefined) {
-        useStudio.setState({ connection: 'disconnected' });
-        return;
-      }
-      retryTimer = setTimeout(connect, delay);
-    }
-    function connect() {
-      if (disposed) return;
-      useStudio.setState({
-        connection: retries ? 'reconnecting' : 'connecting',
-      });
-      try {
-        connection = api.connect(
-          url,
-          (event) => {
-            if (disposed) return;
-            if (event.t !== 'asset.added' && event.t !== 'project.ops')
-              compositor.current?.event(event);
-            useStudio.getState().receive(event);
-            agentController.receive(event);
-            if (
-              event.t === 'agent.status' &&
-              event.state === 'idle' &&
-              event.label === 'paused'
-            )
-              pauseObservers.current.forEach((done) => done());
-            if (event.t === 'agent.action.start') {
-              runningActions.add(event.id);
-            }
-            if (event.t === 'agent.action.end') {
-              runningActions.delete(event.id);
-              setPropertyActivity((current) =>
-                current.filter((item) => item.actionId !== event.id),
-              );
-            }
-            if (
-              event.t === 'project.ops' &&
-              event.actionId &&
-              runningActions.has(event.actionId)
-            ) {
-              const authority = useEditing
-                .getState()
-                .session?.getState().acknowledged;
-              if (authority) {
-                const changed = actionProperties(
-                  authority,
-                  event.ops,
-                  event.actionId,
-                );
-                setPropertyActivity((current) => [
-                  ...current.filter((item) => item.actionId !== event.actionId),
-                  ...changed,
-                ]);
-              }
-              setAgentChange({
-                id: `${event.actionId}:${event.version}`,
-                ops: event.ops,
+    let eventVersion = useProject.getState().acknowledgedVersion;
+    const owner = createSessionRecovery({
+      sessionId,
+      api,
+      onSnapshot(restored) {
+        agentController.restoreHistory(restored.agentHistory);
+        if (
+          restored.project.version > useProject.getState().acknowledgedVersion
+        )
+          diagnosticsTiming.discard(sessionId);
+        eventVersion = restored.project.version;
+        const destination = sessionDestination(sessionId, restored);
+        if (destination.kind === 'redirect') {
+          router.push(destination.href);
+          return 'stop';
+        }
+        if (destination.kind === 'error') {
+          setBoundary('this session could not be restored.');
+          return 'stop';
+        }
+        const edit = useEditing.getState().session;
+        if (
+          edit &&
+          edit.getState().acknowledgedVersion > restored.project.version
+        )
+          throw new Error('authoritative restore is behind acknowledged edits');
+        if (edit)
+          edit.replaceSnapshot({
+            project: restored.project,
+            assets: restored.assets,
+          });
+        else {
+          useProject.getState().replace(restored.project);
+          setAssets(restored.assets);
+        }
+        useStudio.setState({
+          reviewRequested: restored.status === 'awaiting_review',
+        });
+        return 'continue';
+      },
+      onStatus(status) {
+        if (disposed) return;
+        transportReady.current = status === 'connected';
+        useStudio.setState({
+          connection:
+            status === 'restoring'
+              ? 'connecting'
+              : status === 'stopped'
+                ? 'disconnected'
+                : status,
+        });
+        agentController.connection(status === 'connected');
+        if (status === 'connected') {
+          const edit = useEditing.getState().session;
+          if (edit)
+            void edit
+              .ready()
+              .then(() => {
+                if (
+                  !disposed &&
+                  transportReady.current &&
+                  useEditing.getState().session === edit
+                )
+                  return edit.flush();
+              })
+              .catch(() => {
+                if (!disposed)
+                  setBoundary('queued edits could not be restored safely.');
               });
-            }
-            if (event.t === 'asset.added') {
-              const edit = useEditing.getState().session;
-              if (edit) {
-                const authority = edit.getState();
-                edit.replaceSnapshot({
-                  project: authority.acknowledged,
-                  assets: [
-                    ...authority.assets.filter(
-                      (asset) => asset.id !== event.asset.id,
-                    ),
-                    event.asset,
-                  ],
-                });
-              } else
-                setAssets((current) => [
-                  ...current.filter((asset) => asset.id !== event.asset.id),
-                  event.asset,
-                ]);
-            }
-            if (event.t === 'project.ops') {
-              const current = useProject.getState().project;
+        }
+      },
+      onSocket(current) {
+        socket.current = current ?? null;
+      },
+      onFatal(failure) {
+        if (!disposed) setBoundary(failure.message);
+      },
+      onEvent: (event) => {
+        if (disposed) return;
+        if (event.t !== 'asset.added' && event.t !== 'project.ops')
+          compositor.current?.event(event);
+        useStudio.getState().receive(event);
+        agentController.receive(event);
+        if (
+          event.t === 'agent.status' &&
+          event.state === 'idle' &&
+          event.label === 'paused'
+        )
+          pauseObservers.current.forEach((done) => done());
+        if (event.t === 'agent.action.start') {
+          runningActions.add(event.id);
+        }
+        if (event.t === 'agent.action.end') {
+          runningActions.delete(event.id);
+          setPropertyActivity((current) =>
+            current.filter((item) => item.actionId !== event.id),
+          );
+        }
+        if (
+          event.t === 'project.ops' &&
+          event.actionId &&
+          runningActions.has(event.actionId)
+        ) {
+          const authority = useEditing
+            .getState()
+            .session?.getState().acknowledged;
+          if (authority) {
+            const changed = actionProperties(
+              authority,
+              event.ops,
+              event.actionId,
+            );
+            setPropertyActivity((current) => [
+              ...current.filter((item) => item.actionId !== event.actionId),
+              ...changed,
+            ]);
+          }
+          setAgentChange({
+            id: `${event.actionId}:${event.version}`,
+            ops: event.ops,
+          });
+        }
+        if (event.t === 'asset.added') {
+          const edit = useEditing.getState().session;
+          if (edit) {
+            const authority = edit.getState();
+            edit.replaceSnapshot({
+              project: authority.acknowledged,
+              assets: [
+                ...authority.assets.filter(
+                  (asset) => asset.id !== event.asset.id,
+                ),
+                event.asset,
+              ],
+            });
+          } else
+            setAssets((current) => [
+              ...current.filter((asset) => asset.id !== event.asset.id),
+              event.asset,
+            ]);
+        }
+        if (event.t === 'project.ops') {
+          eventVersion = Math.max(eventVersion, event.version);
+          const current = useProject.getState().project;
+          if (
+            current &&
+            event.version <= useProject.getState().acknowledgedVersion
+          )
+            return;
+          compositor.current?.event(event);
+          // Serialize authoritative refetches with contiguous events. A refetch replaces
+          // the asset registry too, and never reapplies the same op batch.
+          projectQueue = projectQueue
+            .then(async () => {
+              if (disposed) return;
+              const latest = useProject.getState().project;
               if (
-                current &&
+                latest &&
                 event.version <= useProject.getState().acknowledgedVersion
               )
                 return;
-              compositor.current?.event(event);
-              // Serialize authoritative refetches with contiguous events. A refetch replaces
-              // the asset registry too, and never reapplies the same op batch.
-              projectQueue = projectQueue
-                .then(async () => {
-                  if (disposed) return;
-                  const latest = useProject.getState().project;
-                  if (
-                    latest &&
-                    event.version <= useProject.getState().acknowledgedVersion
-                  )
-                    return;
-                  if (
-                    !latest ||
-                    event.version !==
-                      useProject.getState().acknowledgedVersion + 1
-                  ) {
-                    const restored = await api.session(sessionId);
-                    if (disposed) return;
-                    if (restored.project.version < event.version)
-                      throw new Error(
-                        'authoritative snapshot is behind the event',
-                      );
-                    const newest = useProject.getState().project;
-                    if (
-                      newest?.id === restored.project.id &&
-                      useProject.getState().acknowledgedVersion >
-                        restored.project.version
-                    )
-                      return;
-                    const edit = useEditing.getState().session;
-                    if (edit)
-                      edit.replaceSnapshot({
-                        project: restored.project,
-                        assets: restored.assets,
-                      });
-                    else {
-                      useProject.getState().replace(restored.project);
-                      setAssets(restored.assets);
-                    }
-                  } else {
-                    const editing = useEditing.getState().session;
-                    if (editing)
-                      await editing.receiveAuthoritative({
-                        version: event.version,
-                        ops: event.ops,
-                        actionId: event.actionId,
-                        author: event.author,
-                        clientMutationId: event.clientMutationId,
-                      });
-                    else
-                      await useProject
-                        .getState()
-                        .receive(sessionId, event.version, event.ops);
-                  }
-                })
-                .catch(() => {
-                  if (!disposed)
-                    setBoundary(
-                      'project sync failed; reload this session to restore the authoritative edit.',
-                    );
-                });
+              if (
+                !latest ||
+                event.version !== useProject.getState().acknowledgedVersion + 1
+              ) {
+                diagnosticsTiming.discard(sessionId);
+                const restored = await api.session(sessionId);
+                if (disposed) return;
+                if (restored.project.version < event.version)
+                  throw new Error('authoritative snapshot is behind the event');
+                const newest = useProject.getState().project;
+                if (
+                  newest?.id === restored.project.id &&
+                  useProject.getState().acknowledgedVersion >
+                    restored.project.version
+                )
+                  return;
+                const edit = useEditing.getState().session;
+                if (edit)
+                  edit.replaceSnapshot({
+                    project: restored.project,
+                    assets: restored.assets,
+                  });
+                else {
+                  useProject.getState().replace(restored.project);
+                  setAssets(restored.assets);
+                }
+              } else {
+                const before = useProject.getState().acknowledgedVersion;
+                const editing = useEditing.getState().session;
+                if (editing)
+                  await editing.receiveAuthoritative({
+                    version: event.version,
+                    ops: event.ops,
+                    actionId: event.actionId,
+                    author: event.author,
+                    clientMutationId: event.clientMutationId,
+                  });
+                else
+                  await useProject
+                    .getState()
+                    .receive(sessionId, event.version, event.ops);
+                if (!disposed)
+                  diagnosticsTiming.applied(
+                    sessionId,
+                    before,
+                    useProject.getState().acknowledgedVersion,
+                    event,
+                  );
+              }
+            })
+            .catch(() => {
+              if (!disposed)
+                setBoundary(
+                  'project sync failed; reload this session to restore the authoritative edit.',
+                );
+              throw new Error('authoritative project sync failed');
+            });
+        }
+        if (event.t === 'agent.message' && event.kind === 'ask_review') {
+          const boundaryVersion = eventVersion;
+          const exactBoundary = transportReady.current;
+          projectQueue = projectQueue.then(() => {
+            const edit = useEditing.getState().session;
+            const current = edit?.getState();
+            if (disposed || !current) return;
+            if (
+              !exactBoundary ||
+              current.acknowledgedVersion !== boundaryVersion
+            ) {
+              setActivity(
+                'cut snapshot unavailable: the exact review revision was not observed.',
+              );
+              return;
             }
-          },
-          retry,
-        );
-        socket.current = connection;
-        const current = connection;
-        current.onopen = () => {
-          if (disposed) return;
-          clearTimeout(handshake);
-          retries = 0;
-          useStudio.setState({ connection: 'connected' });
-          agentController.connection(true);
-        };
-        handshake = setTimeout(() => {
-          if (current.readyState !== WebSocket.OPEN) current.close();
-        }, studioTiming.handshake);
-      } catch {
-        retry();
-      }
-    }
-    connect();
+            const store = cutsStore.current;
+            if (!store) return;
+            store.capture({
+              sessionId,
+              requestId: event.id,
+              project: current.acknowledged,
+              assets: current.assets,
+              createdAt: Date.now(),
+            });
+            setCuts(store.list(sessionId));
+          });
+        }
+        return projectQueue;
+      },
+    });
     return () => {
       disposed = true;
-      clearTimeout(retryTimer);
-      clearTimeout(handshake);
-      connection?.close();
+      transportReady.current = false;
+      owner.dispose();
       socket.current = null;
     };
-  }, [sessionId, snapshot.wsUrl, subscribe, compositor, agentController]);
+  }, [sessionId, subscribe, compositor, agentController, router]);
   const togglePanel = React.useCallback(
     (panel: PanelName) => {
       useStudio.getState().togglePanel(panel);
@@ -598,6 +829,10 @@ export function StudioShell({
   );
   const dispatchAgent = React.useCallback(
     (kind: 'pause' | 'resume' | 'stop') => {
+      if (previewCutRef.current) {
+        setActivity('this cut is read-only.');
+        return;
+      }
       if (kind === 'resume') agentController.resume();
       else agentController.pause(kind === 'stop');
     },
@@ -649,184 +884,213 @@ export function StudioShell({
     }
     useStudio.setState({ fullscreen: !useStudio.getState().fullscreen });
   }, [commands, project.clips, slots.viewer, compositorRef]);
-  React.useEffect(
-    () =>
-      registerStudioKeyboard((id) => {
-        const current = useStudio.getState();
-        if (commands.keyboard?.(id) === true) return true;
-        if (id === 'escape' && current.fullscreen) {
-          useStudio.setState({ fullscreen: false });
-          return true;
-        }
-        if (id === 'help') {
-          setHelp(true);
-          return;
-        }
-        // Keep Dialog's focus trap and Escape handling authoritative.
-        if (document.querySelector('[role="dialog"]')) return false;
-        if (id === 'composer') {
-          useStudio.setState({ agentCollapsed: false });
-          setWatchTab('chat');
-          setAgentTab('chat');
-          requestAnimationFrame(() => focusComposer());
-          return;
-        }
-        if (id === 'pause-agent') {
-          (commands.pauseAgent ?? pauseAgent)();
-          return;
-        }
-        if (id === 'fullscreen') {
-          fullscreen();
-          return;
-        }
-        if (id === 'play') {
-          current.requestPlayback(!current.playing);
-          return;
-        }
-        if (id.startsWith('shuttle-')) {
-          const shuttle = id === 'shuttle-j' ? -1 : id === 'shuttle-l' ? 1 : 0;
-          current.requestPlayback(shuttle !== 0, shuttle);
-          return;
-        }
-        if (id === 'add-text') {
-          const edit = useEditing.getState().session;
-          if (!edit) return false;
-          try {
-            const { clipId, ops } = addTextAtPlayhead(
-              edit.getState().project,
-              current.playhead,
+  const routeShortcut = React.useCallback(
+    (id: string, allowDialog = false) => {
+      const current = useStudio.getState();
+      if (commands.keyboard?.(id) === true) return true;
+      if (id === 'escape' && current.fullscreen) {
+        useStudio.setState({ fullscreen: false });
+        return true;
+      }
+      if (id === 'help') {
+        setHelp(true);
+        return;
+      }
+      if (id === 'palette') {
+        setPaletteOpen((open) => !open);
+        return true;
+      }
+      // Keep Dialog's focus trap and Escape handling authoritative.
+      if (!allowDialog && document.querySelector('[role="dialog"]'))
+        return false;
+      if (id === 'composer') {
+        useStudio.setState({ agentCollapsed: false });
+        setWatchTab('chat');
+        setAgentTab('chat');
+        requestAnimationFrame(() => focusComposer());
+        return;
+      }
+      if (id === 'pause-agent') {
+        (commands.pauseAgent ?? pauseAgent)();
+        return;
+      }
+      if (id === 'fullscreen') {
+        fullscreen();
+        return;
+      }
+      if (id === 'play') {
+        current.requestPlayback(!current.playing);
+        return;
+      }
+      if (id.startsWith('shuttle-')) {
+        const shuttle = id === 'shuttle-j' ? -1 : id === 'shuttle-l' ? 1 : 0;
+        current.requestPlayback(shuttle !== 0, shuttle);
+        return;
+      }
+      if (
+        previewCutRef.current &&
+        [
+          'add-text',
+          'edit-v',
+          'edit-d',
+          'delete',
+          'delete-lift',
+          'split',
+          'undo',
+          'redo',
+          'submit',
+          'pause-agent',
+        ].includes(id)
+      ) {
+        setActivity(
+          'this cut is read-only. return to the current edit to make changes.',
+        );
+        return true;
+      }
+      if (id === 'add-text') {
+        const edit = useEditing.getState().session;
+        if (!edit) return false;
+        try {
+          const { clipId, ops } = addTextAtPlayhead(
+            edit.getState().project,
+            current.playhead,
+          );
+          void edit
+            .editGroup(ops, 'add text', 'keyboard')
+            .then((result) => {
+              if (result.status === 'failed')
+                setBoundary(result.error ?? 'text could not be added');
+            })
+            .catch((error: unknown) =>
+              setBoundary(
+                error instanceof Error
+                  ? error.message
+                  : 'text could not be added',
+              ),
             );
+          useStudio.setState({ selection: [clipId] });
+          setTextEditingId(clipId);
+        } catch (error) {
+          setBoundary(
+            error instanceof Error ? error.message : 'text could not be added',
+          );
+        }
+        return;
+      }
+      if (
+        [
+          'edit-c',
+          'edit-v',
+          'edit-d',
+          'delete',
+          'delete-lift',
+          'split',
+        ].includes(id)
+      ) {
+        const edit = useEditing.getState().session;
+        if (!edit) return false;
+        const p = edit.getState().project;
+        if (id === 'edit-c') {
+          clipboard.current = copyClips(p, current.selection);
+          return;
+        }
+        try {
+          const ops =
+            id === 'edit-v'
+              ? clipboard.current
+                ? pasteClips(
+                    p,
+                    clipboard.current,
+                    current.playhead,
+                    edit.getState().assets,
+                  )
+                : []
+              : id === 'edit-d'
+                ? duplicateClips(p, current.selection)
+                : id === 'split'
+                  ? splitClips(p, current.selection, current.playhead)
+                  : deleteClips(p, current.selection, {
+                      lift: id === 'delete-lift',
+                    });
+          if (ops.length)
             void edit
-              .editGroup(ops, 'add text', 'keyboard')
-              .then((result) => {
-                if (result.status === 'failed')
-                  setBoundary(result.error ?? 'text could not be added');
-              })
+              .editGroup(
+                ops,
+                id === 'edit-v'
+                  ? 'paste clips'
+                  : id === 'edit-d'
+                    ? 'duplicate clips'
+                    : id === 'split'
+                      ? 'split clips'
+                      : 'delete clips',
+                'keyboard',
+              )
               .catch((error: unknown) =>
                 setBoundary(
                   error instanceof Error
                     ? error.message
-                    : 'text could not be added',
+                    : 'edit could not be saved',
                 ),
               );
-            useStudio.setState({ selection: [clipId] });
-            setTextEditingId(clipId);
-          } catch (error) {
-            setBoundary(
-              error instanceof Error
-                ? error.message
-                : 'text could not be added',
-            );
-          }
-          return;
-        }
-        if (
-          [
-            'edit-c',
-            'edit-v',
-            'edit-d',
-            'delete',
-            'delete-lift',
-            'split',
-          ].includes(id)
-        ) {
-          const edit = useEditing.getState().session;
-          if (!edit) return false;
-          const p = edit.getState().project;
-          if (id === 'edit-c') {
-            clipboard.current = copyClips(p, current.selection);
-            return;
-          }
-          try {
-            const ops =
-              id === 'edit-v'
-                ? clipboard.current
-                  ? pasteClips(
-                      p,
-                      clipboard.current,
-                      current.playhead,
-                      edit.getState().assets,
-                    )
-                  : []
-                : id === 'edit-d'
-                  ? duplicateClips(p, current.selection)
-                  : id === 'split'
-                    ? splitClips(p, current.selection, current.playhead)
-                    : deleteClips(p, current.selection, {
-                        lift: id === 'delete-lift',
-                      });
-            if (ops.length)
-              void edit
-                .editGroup(
-                  ops,
-                  id === 'edit-v'
-                    ? 'paste clips'
-                    : id === 'edit-d'
-                      ? 'duplicate clips'
-                      : id === 'split'
-                        ? 'split clips'
-                        : 'delete clips',
-                  'keyboard',
-                )
-                .catch((error: unknown) =>
-                  setBoundary(
-                    error instanceof Error
-                      ? error.message
-                      : 'edit could not be saved',
-                  ),
-                );
-          } catch (error) {
-            setBoundary(
-              error instanceof Error ? error.message : 'edit is unavailable',
-            );
-          }
-          return;
-        }
-        if (id === 'frame-back')
-          current.seek(current.playhead - 1 / project.fps);
-        else if (id === 'frame-next')
-          current.seek(current.playhead + 1 / project.fps);
-        else if (id === 'second-back') current.seek(current.playhead - 1);
-        else if (id === 'second-next') current.seek(current.playhead + 1);
-        else if (id === 'start') current.seek(0);
-        else if (id === 'end') current.seek(current.duration);
-        else if (id === 'i') useStudio.setState({ inPoint: current.playhead });
-        else if (id === 'o') useStudio.setState({ outPoint: current.playhead });
-        else if (id === 's')
-          useStudio.setState({ snapping: !current.snapping });
-        else if (id === 'fit') {
-          setTimelineZoom(null);
-          useStudio.setState({ zoom: 1 });
-        } else if (['v', 'b', 'y', 't'].includes(id))
-          useStudio.setState({
-            tool: ({ v: 'select', b: 'blade', y: 'slip', t: 'text' } as const)[
-              id as 'v' | 'b' | 'y' | 't'
-            ],
-          });
-        else if (id === 'escape') {
-          if (document.querySelector('[role="listbox"]')) return false;
-          composer.current?.blur();
-          focusTimeline();
-          return true;
-        } else if (id === 'undo') {
-          if (commands.undo) commands.undo();
-          else void useEditing.getState().session?.undoUser();
-        } else if (id === 'redo') {
-          if (commands.redo) commands.redo();
-          else void useEditing.getState().session?.redoUser();
-        } else if (id === 'submit') {
-          agentComposer.current?.submit();
-        } else {
+        } catch (error) {
           setBoundary(
-            id === 'submit'
-              ? 'sending connects in Phase 8'
-              : 'editing commands connect in Phase 7',
+            error instanceof Error ? error.message : 'edit is unavailable',
           );
         }
-      }),
+        return;
+      }
+      if (id === 'frame-back') current.seek(current.playhead - 1 / project.fps);
+      else if (id === 'frame-next')
+        current.seek(current.playhead + 1 / project.fps);
+      else if (id === 'second-back') current.seek(current.playhead - 1);
+      else if (id === 'second-next') current.seek(current.playhead + 1);
+      else if (id === 'start') current.seek(0);
+      else if (id === 'end') current.seek(current.duration);
+      else if (id === 'i') useStudio.setState({ inPoint: current.playhead });
+      else if (id === 'o') useStudio.setState({ outPoint: current.playhead });
+      else if (id === 's') useStudio.setState({ snapping: !current.snapping });
+      else if (id === 'fit') {
+        setTimelineZoom(null);
+        useStudio.setState({ zoom: 1 });
+      } else if (['v', 'b', 'y', 't'].includes(id))
+        useStudio.setState({
+          tool: ({ v: 'select', b: 'blade', y: 'slip', t: 'text' } as const)[
+            id as 'v' | 'b' | 'y' | 't'
+          ],
+        });
+      else if (id === 'escape') {
+        if (document.querySelector('[role="listbox"]')) return false;
+        composer.current?.blur();
+        focusTimeline();
+        return true;
+      } else if (id === 'undo') {
+        if (commands.undo) commands.undo();
+        else void useEditing.getState().session?.undoUser();
+      } else if (id === 'redo') {
+        if (commands.redo) commands.redo();
+        else void useEditing.getState().session?.redoUser();
+      } else if (id === 'submit') {
+        agentComposer.current?.submit();
+      } else {
+        setBoundary(
+          id === 'submit'
+            ? 'sending connects in Phase 8'
+            : 'editing commands connect in Phase 7',
+        );
+      }
+    },
     [commands, pauseAgent, fullscreen, project.fps, agentController],
   );
+  React.useEffect(
+    () => registerStudioKeyboard((id) => routeShortcut(id)),
+    [routeShortcut],
+  );
   const uploadFiles = async (files: readonly File[]) => {
+    if (
+      previewCutRef.current ||
+      useEditing.getState().state?.persistenceStatus === 'locked'
+    )
+      throw new Error('this view is read-only');
     const life = uploadLife.current;
     if (!life || life.signal.aborted) return [];
     return attachSessionUploads({
@@ -912,6 +1176,18 @@ export function StudioShell({
   }, [selectedTrackId, project]);
   const editorSlots: StudioSlots = {
     ...slots,
+    timelineActions: (
+      <BeatToggle
+        available={detectedBeats.length > 0}
+        enabled={beatGridEnabled}
+        onChange={setBeatGridEnabled}
+        reason={
+          detectedBeats.length
+            ? undefined
+            : 'beat detections were not supplied by the service.'
+        }
+      />
+    ),
     timelineOwnsChrome: slots.timeline
       ? slots.timelineOwnsChrome
       : !!(editingState && editingSession),
@@ -923,6 +1199,7 @@ export function StudioShell({
           assets={assets}
           editing={editingSession}
           editState={editingState}
+          beats={beatGridEnabled ? detectedBeats : undefined}
           selection={state.selection}
           setSelection={(selection) => {
             setSelectedTrackId(null);
@@ -1018,6 +1295,10 @@ export function StudioShell({
       ) : undefined),
   };
   const finish = () => {
+    if (previewCutRef.current) {
+      setActivity('return to the current edit to render.');
+      return;
+    }
     if (commands.finish) {
       commands.finish();
       return;
@@ -1037,6 +1318,9 @@ export function StudioShell({
     !editingState.draft &&
     editingState.pending.length === 0 &&
     editingState.saveStatus === 'saved';
+  React.useEffect(() => {
+    if (reviewMode === 'review') analytics.track('review_shown', {});
+  }, [reviewMode]);
   const navigateToRender = (videoId?: string) => {
     const href = videoId
       ? `/v/${encodeURIComponent(videoId)}`
@@ -1079,7 +1363,14 @@ export function StudioShell({
           'the edit changed; review the current cut before rendering',
         );
       const outcome = await approveCut({
-        client: api,
+        client: {
+          session: api.session,
+          approve: async (id, input, options) => {
+            const result = await api.approve(id, input, options);
+            analytics.track('render_started', {});
+            return result;
+          },
+        },
         sessionId,
         options: { ...options, preset: '1080p' },
         signal: life.signal,
@@ -1190,6 +1481,14 @@ export function StudioShell({
         ? ('review' as const)
         : ('none' as const);
   const sendConversation = (text: string) => {
+    if (
+      previewCutRef.current ||
+      useEditing.getState().state?.persistenceStatus === 'locked'
+    ) {
+      setActivity('this view is read-only.');
+      return;
+    }
+    setRecentPrompts(rememberPrompt(localStorageAdapter, text));
     void agentController
       .send({ text })
       .catch((error: unknown) =>
@@ -1324,9 +1623,18 @@ export function StudioShell({
               ? 'other'
               : 'composer'
           }
+          disabled={
+            !!previewCut || editingState?.persistenceStatus === 'locked'
+          }
           parentHandlesModEnter={true}
           onEscape={focusTimeline}
           onSend={async (input) => {
+            if (
+              previewCutRef.current ||
+              useEditing.getState().state?.persistenceStatus === 'locked'
+            )
+              throw new Error('this view is read-only');
+            setRecentPrompts(rememberPrompt(localStorageAdapter, input.text));
             await agentController.send(input);
             setReviewComposer(false);
             setChatAttachments([]);
@@ -1441,6 +1749,28 @@ export function StudioShell({
       <StudioTopBar
         projectTitle={projectTitle}
         onTitleChange={setProjectTitle}
+        readOnly={!!previewCut}
+        projectActions={
+          <CutsMenu
+            cuts={cuts}
+            selectedId={previewCut?.id ?? null}
+            onExit={() => setPreviewCut(null)}
+            onSelect={(id) => {
+              const cut = cuts.find((item) => item.id === id);
+              if (!cut) return;
+              if (slots.viewer) {
+                setActivity(
+                  'historical preview is unavailable for this custom viewer.',
+                );
+                return;
+              }
+              useStudio.getState().requestPlayback(false);
+              setTextEditingId(null);
+              setPreviewCut(cut);
+              useStudio.getState().seek(0);
+            }}
+          />
+        }
         projectSave={editingState?.saveStatus}
         sessionId={sessionId}
         commands={{
@@ -1472,6 +1802,22 @@ export function StudioShell({
           dismiss
         </Button>
       </div>
+      {previewCut && (
+        <CutPreviewBanner
+          cut={previewCut}
+          onExit={() => setPreviewCut(null)}
+          restoreDisabledReason="restoring cuts requires a verified backend capability; the live edit has not been changed."
+        />
+      )}
+      {editingState && editingState.persistenceStatus !== 'ready' && (
+        <div className="studio-storage-notice" role="status">
+          {editingState.persistenceStatus === 'hydrating'
+            ? 'restoring saved edits…'
+            : editingState.persistenceStatus === 'locked'
+              ? 'another tab owns this edit. this tab is read-only.'
+              : 'local edit storage is unavailable. changes remain unsaved in this tab and will not be sent.'}
+        </div>
+      )}
       <div className="studio-workspace" data-testid="studio-workspace">
         <div className="studio-upper">
           <AgentPanel
@@ -1491,10 +1837,27 @@ export function StudioShell({
             slots={{
               ...slots,
               reviewOverlay: (
-                <ReviewPrompt
-                  requestId={latestReview?.id ?? null}
-                  onWatch={presentation.onPlayFromStart}
-                />
+                <>
+                  <ReviewPrompt
+                    requestId={previewCut ? null : (latestReview?.id ?? null)}
+                    onWatch={presentation.onPlayFromStart}
+                  />
+                  {cuts[0] && (
+                    <div className="studio-compare-control">
+                      <CompareControl
+                        cutLabel={cuts[0].label}
+                        capability={{
+                          available: false,
+                          reason:
+                            'synchronized cut comparison is not available from this renderer.',
+                        }}
+                        value={50}
+                        onChange={() => undefined}
+                        onEnable={() => undefined}
+                      />
+                    </div>
+                  )}
+                </>
               ),
               viewer:
                 slots.viewer ??
@@ -1504,8 +1867,9 @@ export function StudioShell({
                     project={project}
                     assets={rendererAssets}
                     bridgeRef={compositor}
-                    editing={editingSession}
-                    onOpenText={setTextEditingId}
+                    historical={!!previewCut}
+                    editing={previewCut ? null : editingSession}
+                    onOpenText={previewCut ? undefined : setTextEditingId}
                     activeTextId={textEditingId}
                     onTextFinish={() => setTextEditingId(null)}
                     debug={
@@ -1611,6 +1975,95 @@ export function StudioShell({
             : undefined
         }
       />
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        commands={[
+          {
+            id: 'add-text',
+            label: 'add text',
+            disabledReason: previewCut ? 'this cut is read-only' : undefined,
+            run: () => {
+              routeShortcut('add-text', true);
+            },
+          },
+          {
+            id: 'split',
+            label: 'split',
+            disabledReason: previewCut ? 'this cut is read-only' : undefined,
+            run: () => {
+              routeShortcut('split', true);
+            },
+          },
+          {
+            id: 'render',
+            label: 'render',
+            disabledReason: previewCut
+              ? 'return to the current edit to render'
+              : undefined,
+            run: finish,
+          },
+          {
+            id: 'captions',
+            label: 'toggle captions',
+            disabledReason: previewCut ? 'this cut is read-only' : undefined,
+            run: () => {
+              const edit = useEditing.getState().session;
+              if (!edit) return;
+              const current = edit.getState().project;
+              const trackIds = new Set(
+                Object.values(current.clips)
+                  .filter(isCaptionClip)
+                  .map((clip) => clip.trackId),
+              );
+              const tracks = current.tracks.filter((track) =>
+                trackIds.has(track.id),
+              );
+              if (!tracks.length) {
+                setActivity('no caption track is available.');
+                return;
+              }
+              const hidden = !tracks.every((track) => track.hidden);
+              void edit.editGroup(
+                tracks.map((track) => ({
+                  op: 'track.update' as const,
+                  id: track.id,
+                  patch: { hidden },
+                })),
+                'toggle captions',
+                'keyboard',
+              );
+            },
+          },
+        ]}
+        clips={Object.values(project.clips).map((clip) => ({
+          id: clip.id,
+          name: clipLabel(clip, assets),
+        }))}
+        recentPrompts={recentPrompts}
+        onSelectClip={(id) => {
+          const clip = project.clips[id];
+          if (clip) {
+            useStudio.setState({ selection: [id] });
+            useStudio.getState().seek(clip.start);
+          }
+        }}
+        onPrompt={(text) => {
+          agentComposer.current?.prefill(text);
+          focusComposer();
+        }}
+      />
+      {!paletteOpen &&
+        !help &&
+        !boundary &&
+        reviewMode === 'closed' &&
+        cutsStore.current && (
+          <ShortcutsCoachmarks
+            storage={localStorageAdapter}
+            anchors={coachAnchors}
+            onPrepareAnchor={prepareCoachAnchor}
+          />
+        )}
       <StudioStatusBar activity={activity} />
       <ShortcutsDialog open={help} onOpenChange={setHelp} />
       <Dialog

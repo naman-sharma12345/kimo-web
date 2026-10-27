@@ -45,9 +45,9 @@ describe('session and focus lifecycle', () => {
     outer.remove();
   });
   it('session prop replacement aborts old timers without leaking unsent text to the new session', async () => {
+    const a = await setupText(),
+      b = await setupText();
     vi.useFakeTimers();
-    const a = setupText(),
-      b = setupText();
     const { rerender, unmount } = render(
       <InspectorTextField editing={a.editing} clip={a.project.clips.t} />,
     );
@@ -69,8 +69,9 @@ describe('session and focus lifecycle', () => {
     b.editing.dispose();
   });
   it('viewer AI deletion during composition cancels immediately, restores preview and calls core notifications', async () => {
+    const { editing, project, ops, toast, selectionRemoved } =
+      await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops, toast, selectionRemoved } = setupText();
     const hide = vi.fn(),
       finish = vi.fn();
     render(
@@ -107,8 +108,8 @@ describe('session and focus lifecycle', () => {
     editing.dispose();
   });
   it('commits lower-third primary and secondary as one text.update without separate history groups', async () => {
+    const { editing, project, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops } = setupText();
     const secondary = {
       ...layout.primary,
       bounds: { ...layout.primary.bounds, y: 80 },
@@ -143,8 +144,8 @@ describe('session and focus lifecycle', () => {
     act(() => editing.dispose());
   });
   it('viewer focusout without a related target commits exactly once and restores parent focus', async () => {
+    const { editing, project, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops } = setupText();
     const target = document.createElement('button');
     document.body.append(target);
     target.focus();
@@ -176,8 +177,8 @@ describe('session and focus lifecycle', () => {
 
 describe('StrictMode cleanup', () => {
   it('repeated setup/cleanup leaves no dirty timer or persisted edit after unmount', async () => {
+    const { editing, project, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops } = setupText();
     const hide = vi.fn();
     const { unmount } = render(
       <React.StrictMode>

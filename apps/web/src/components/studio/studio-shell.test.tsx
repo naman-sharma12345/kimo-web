@@ -24,7 +24,16 @@ const mocks = vi.hoisted(() => ({
   session: vi.fn(),
   approve: vi.fn(),
 }));
-vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mocks.push }) }));
+vi.mock('next/navigation', () => {
+  const router = { push: mocks.push };
+  return { useRouter: () => router };
+});
+vi.mock('@/lib/editing/indexeddb', async () => {
+  const { testPersistence } =
+    await import('@/lib/editing/persistence-test-helpers');
+  const durable = testPersistence();
+  return { createIndexedDBEditPersistence: () => durable.persistence };
+});
 vi.mock('@/lib/api', () => ({
   api: {
     connect: mocks.connect,
@@ -62,9 +71,13 @@ beforeEach(() => {
     },
   );
   vi.clearAllMocks();
-  mocks.session.mockResolvedValue(snapshot);
+  mocks.session.mockResolvedValue({
+    ...snapshot,
+    wsUrl: 'ws://localhost/session',
+  });
   mocks.approve.mockResolvedValue({ renderId: 'render-job' });
   localStorage.clear();
+  localStorage.setItem('kimo-shortcuts-dismissed:v1', 'true');
   Object.defineProperty(window, 'innerWidth', {
     value: 1920,
     writable: true,
@@ -72,6 +85,7 @@ beforeEach(() => {
   });
   mocks.connect.mockImplementation((_url, receive) => {
     mocks.receive = receive;
+    queueMicrotask(() => receive({ t: 'hello', version: 0 }));
     return {
       readyState: WebSocket.OPEN,
       send: mocks.send,
@@ -115,7 +129,7 @@ describe('Phase 5 studio shell integration', () => {
     ).toHaveLength(1);
     expect(screen.queryByLabelText('loading timeline')).not.toBeInTheDocument();
   });
-  it('restores only supplied recorded IDs after reset and deduplicates live replay', () => {
+  it('restores only supplied recorded IDs after reset and deduplicates live replay', async () => {
     const actionIds = ['server-recorded-a', 'server-recorded-b'];
     const restored: SessionSnapshot = {
       ...snapshot,
@@ -124,8 +138,12 @@ describe('Phase 5 studio shell integration', () => {
       actionIds,
       wsUrl: 'ws://localhost/session',
     };
+    mocks.session.mockResolvedValue(restored);
     const { rerender } = render(
       <StudioShell sessionId="restored" snapshot={restored} />,
+    );
+    await waitFor(() =>
+      expect(useStudio.getState().connection).toBe('connected'),
     );
     expect(useStudio.getState().actionIds).toEqual(actionIds);
     expect(
@@ -265,6 +283,9 @@ describe('Phase 5 studio shell integration', () => {
         sessionId="s"
         snapshot={{ ...snapshot, wsUrl: 'ws://localhost/session' }}
       />,
+    );
+    await waitFor(() =>
+      expect(useStudio.getState().connection).toBe('connected'),
     );
     expect(mocks.connect).toHaveBeenCalledTimes(1);
     const ws = mocks.connect.mock.results[0]?.value as {
@@ -427,6 +448,9 @@ describe('Phase 8 Shell transport integration', () => {
         snapshot={{ ...snapshot, wsUrl: 'ws://example.test/s' }}
       />,
     );
+    await waitFor(() =>
+      expect(useStudio.getState().connection).toBe('connected'),
+    );
     act(() =>
       mocks.receive?.({
         t: 'agent.action.start',
@@ -476,19 +500,23 @@ describe('Phase 8 Shell transport integration', () => {
   });
 });
 
-it('projects one actual start target into all five surfaces without fabricating property edits', () => {
+it('projects one actual start target into all five surfaces without fabricating property edits', async () => {
   const targetSnapshot: SessionSnapshot = {
     ...snapshot,
     project: sceneProject(),
     assets: [sceneSource],
     wsUrl: 'ws://example.test/target',
   };
+  mocks.session.mockResolvedValue(targetSnapshot);
   render(
     <StudioShell
       sessionId="target"
       snapshot={targetSnapshot}
       slots={{ viewer: <span>custom preview</span> }}
     />,
+  );
+  await waitFor(() =>
+    expect(useStudio.getState().connection).toBe('connected'),
   );
   act(() =>
     mocks.receive?.({
@@ -566,6 +594,9 @@ describe('Phase 9 review approval integration', () => {
         snapshot={{ ...reviewSnapshot, wsUrl: 'ws://example.test/working' }}
       />,
     );
+    await waitFor(() =>
+      expect(useStudio.getState().connection).toBe('connected'),
+    );
     act(() =>
       mocks.receive?.({
         t: 'agent.action.start',
@@ -612,4 +643,43 @@ describe('Phase 9 review approval integration', () => {
     expect(mocks.approve).toHaveBeenCalledTimes(1);
     expect(mocks.push).not.toHaveBeenCalled();
   });
+});
+
+it('restores actual initial and authoritative chat history without replaying a send', async () => {
+  const first = {
+    t: 'agent.message' as const,
+    id: 'recorded-summary',
+    role: 'agent' as const,
+    kind: 'say' as const,
+    text: 'recorded before this visit',
+  };
+  const second = {
+    ...first,
+    id: 'recorded-after-gap',
+    text: 'recorded while disconnected',
+  };
+  mocks.session.mockResolvedValue({
+    ...snapshot,
+    agentHistory: [first, second],
+    wsUrl: 'ws://localhost/session',
+  });
+  render(
+    <StudioShell
+      sessionId="restored-history"
+      snapshot={{ ...snapshot, agentHistory: [first] }}
+    />,
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByText(first.text, { selector: 'span' }),
+    ).toBeInTheDocument(),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByText(second.text, { selector: 'span' }),
+    ).toBeInTheDocument(),
+  );
+  expect(screen.getAllByText(first.text, { selector: 'span' })).toHaveLength(1);
+  expect(mocks.message).not.toHaveBeenCalled();
+  expect(mocks.send).not.toHaveBeenCalled();
 });

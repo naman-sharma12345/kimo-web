@@ -2,17 +2,19 @@ import * as React from 'react';
 import { cache } from 'react';
 import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
-import { api } from '@/lib/api';
+import { createServerApi } from '@/lib/server-api';
 import { deliveryMetadata } from '@/lib/delivery/metadata';
 import { routeFailure } from '@/lib/render/lifecycle';
 import { RouteState } from '@/components/render/route-state';
 import { DeliveryScreen } from '@/components/delivery/delivery-screen';
 export const dynamic = 'force-dynamic';
 const load = cache((id: string) =>
-  api.video(id).then(
-    (video) => ({ video }),
-    (error) => ({ error: routeFailure(error) }),
-  ),
+  createServerApi()
+    .then((api) => api.video(id))
+    .then(
+      (video) => ({ video }),
+      (error) => ({ error: routeFailure(error) }),
+    ),
 );
 export async function generateMetadata({
   params,

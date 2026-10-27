@@ -19,7 +19,15 @@ export interface TimelineInlineTextProps {
   editing: EditingAPI;
   onClose: () => void;
 }
+/** Project-clock detections supplied by the trusted producer adapter, never synthetic markers. */
+export interface TimelineBeat {
+  clipId: string;
+  trackId: string;
+  time: number;
+}
 export interface TimelineEditorProps {
+  /** Parent supplies actual projected detections only while the beat toggle is enabled. */
+  beats?: readonly TimelineBeat[];
   project: KimoProject;
   assets: readonly Asset[];
   editing: EditingAPI;

@@ -1,4 +1,4 @@
-import { LandingPage } from '@/components/landing/landing-page';
+import { LandingBootstrap } from '@/components/landing/landing-bootstrap';
 export default function Page() {
-  return <LandingPage />;
+  return <LandingBootstrap />;
 }

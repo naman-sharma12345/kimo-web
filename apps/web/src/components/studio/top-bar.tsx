@@ -38,6 +38,8 @@ export function StudioTopBar({
   projectSave,
   projectTitle,
   onTitleChange,
+  readOnly = false,
+  projectActions,
 }: {
   sessionId: string;
   commands: StudioCommands;
@@ -46,6 +48,8 @@ export function StudioTopBar({
   projectSave?: SaveStatus;
   projectTitle?: string;
   onTitleChange?: (title: string) => void;
+  readOnly?: boolean;
+  projectActions?: React.ReactNode;
 }) {
   const state = useStudio();
   const [localTitle, setLocalTitle] = React.useState('untitled video');
@@ -152,6 +156,7 @@ export function StudioTopBar({
           ) : (
             <h1 className="studio-project-title">
               <button
+                disabled={readOnly}
                 onClick={() => {
                   setDraft(title);
                   setEditing(true);
@@ -162,6 +167,7 @@ export function StudioTopBar({
               </button>
             </h1>
           )}
+          {projectActions}
           <span
             className="studio-save"
             data-offline={saveLabel.startsWith('offline') || undefined}

@@ -13,6 +13,14 @@ export interface StudioShortcut {
 }
 /** Single source for dispatch and the help dialog. Mod means Command or Control. */
 export const studioShortcuts: readonly StudioShortcut[] = [
+  {
+    id: 'palette',
+    key: 'p',
+    mod: true,
+    whileTyping: true,
+    label: 'command palette',
+    keys: ['⌘', 'P'],
+  },
   { id: 'play', key: ' ', label: 'play/pause', keys: ['Space'] },
   ...(['j', 'k', 'l'] as const).map((key) => ({
     id: `shuttle-${key}`,

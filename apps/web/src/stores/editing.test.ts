@@ -3,6 +3,7 @@ import { applyOps, type KimoProject, type Op } from '@kimo/client';
 import { api } from '@/lib/api';
 import { fixture, assets } from '@/lib/editing/test-fixtures';
 import { useEditing } from './editing';
+import { testPersistence } from '@/lib/editing/persistence-test-helpers';
 import { useProject } from './project';
 afterEach(() => {
   useProject.getState().dispose();
@@ -15,6 +16,7 @@ function context(sessionId = 's') {
     sessionId,
     project,
     assets,
+    persistence: testPersistence().persistence,
     client: {
       ops: vi.fn(async (_id: string, ops: Op[], version: number) => {
         expect(version).toBe(project.version);
@@ -32,6 +34,7 @@ function context(sessionId = 's') {
 describe('editing store and useProject compatibility', () => {
   it('mirrors stable subscription snapshots and disposes the prior session on switch', async () => {
     const first = useEditing.getState().connect(context());
+    await first.ready();
     expect(first.getState()).toBe(first.getState());
     const id = first.beginEdit({
       clipIds: ['c'],
@@ -43,13 +46,15 @@ describe('editing store and useProject compatibility', () => {
     ]);
     expect(useEditing.getState().state?.project.clips.c?.start).toBe(2);
     expect(useEditing.getState().state?.acknowledgedVersion).toBe(0);
-    useEditing.getState().connect(context('new-session'));
+    const second = useEditing.getState().connect(context('new-session'));
+    await second.ready();
     expect(first.getState().saveStatus).toBe('disposed');
     expect(useEditing.getState().state?.project.clips.c?.start).toBe(0);
   });
   it('keeps useProject projection live for observeCompositor without advancing acknowledgedVersion during preview', async () => {
     const ctx = context();
     const session = useProject.getState().attach(ctx);
+    await session.ready();
     const observer = vi.fn();
     const unsubscribe = useProject.subscribe(observer);
     const id = session.beginEdit({
@@ -75,6 +80,17 @@ describe('editing store and useProject compatibility', () => {
       project = applyOps(project, ops);
       return { version: project.version };
     });
+    const session = useProject.getState().attach({
+      sessionId: 's',
+      project,
+      assets,
+      persistence: testPersistence().persistence,
+      client: {
+        ops: (...args) => api.ops(...args),
+        session: (...args) => api.session(...args),
+      },
+    });
+    await session.ready();
     useProject.getState().replace(project);
     await useProject
       .getState()
@@ -90,6 +106,7 @@ describe('editing store and useProject compatibility', () => {
   it('does not regress authority when an older legacy snapshot arrives', async () => {
     const ctx = context();
     const session = useProject.getState().attach(ctx);
+    await session.ready();
     await session.editGroup(
       [{ op: 'clip.move', id: 'c', trackId: 'v', start: 1 }],
       'move',

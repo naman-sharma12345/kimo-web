@@ -33,8 +33,8 @@ const measured: MeasuredTextOverlayBounds = {
 beforeEach(() => {
   vi.clearAllMocks();
 });
-function mount() {
-  const h = setupText(),
+async function mount() {
+  const h = await setupText(),
     hide = vi.fn(),
     finish = vi.fn();
   const scene = buildScene(h.project, 0);
@@ -53,7 +53,7 @@ function mount() {
 }
 it('uses the independent measured primary geometry, not the combined box, and hides only after loaded-font readiness', async () => {
   mocks.measure.mockResolvedValue(measured);
-  const h = mount();
+  const h = await mount();
   try {
     const field = await screen.findByRole('textbox', {
       name: 'viewer text content',
@@ -74,7 +74,7 @@ it('uses the independent measured primary geometry, not the combined box, and hi
 });
 it('keeps canvas text visible for font-pending geometry', async () => {
   mocks.measure.mockResolvedValue({ ...measured, status: 'font-pending' });
-  const h = mount();
+  const h = await mount();
   try {
     await waitFor(() =>
       expect(screen.getByRole('status')).toHaveTextContent('waiting for font'),
@@ -90,7 +90,7 @@ it('keeps canvas text visible for font-pending geometry', async () => {
 });
 it('shows an explicit layout boundary when measurement fails and never substitutes estimated bounds', async () => {
   mocks.measure.mockRejectedValue(new Error('font metrics unavailable'));
-  const h = mount();
+  const h = await mount();
   try {
     await waitFor(() =>
       expect(screen.getByRole('status')).toHaveTextContent(

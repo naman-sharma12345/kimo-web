@@ -1,5 +1,6 @@
 'use client';
 import * as React from 'react';
+import { analytics } from '@/lib/diagnostics';
 import { useRouter } from 'next/navigation';
 import { motion, useReducedMotion } from 'motion/react';
 import { Download, Link as LinkIcon, Share, Pencil } from 'lucide-react';
@@ -24,15 +25,20 @@ import {
 } from '@/components/ui/popover';
 import { VideoPlayer } from './video-player';
 import styles from './delivery.module.css';
+import { CaptionDownload } from '@/components/studio/finish';
+import type { CaptionCue } from '@/lib/studio-finish';
 
 export function DeliveryScreen({
   videoId,
   video,
   canEdit = false,
+  captions = [],
 }: {
   videoId: string;
   video: Video;
   canEdit?: boolean;
+  /** Verified final-render cues only, never an unrelated local Studio snapshot. */
+  captions?: readonly CaptionCue[];
 }) {
   const router = useRouter();
   const reduced = !!useReducedMotion();
@@ -190,6 +196,7 @@ export function DeliveryScreen({
         transition={spring.soft}
       >
         <div className={styles.horizon} aria-hidden="true" />
+        <CaptionDownload cues={captions} title={video.title} />
         <VideoPlayer video={video} />
       </motion.section>
       <motion.div
@@ -203,6 +210,7 @@ export function DeliveryScreen({
             data-size="lg"
             download={downloadFilename(video.title)}
             href={downloadUrl}
+            onClick={() => analytics.track('download_clicked', {})}
           >
             <Download aria-hidden="true" />
             download mp4
@@ -222,6 +230,7 @@ export function DeliveryScreen({
               size="lg"
               onClick={(event) => {
                 event.preventDefault();
+                analytics.track('share_clicked', {});
                 void share();
               }}
             >
@@ -237,11 +246,19 @@ export function DeliveryScreen({
                   href={link.href}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => analytics.track('share_clicked', {})}
                 >
                   {link.label}
                 </a>
               ))}
-              <Button onClick={() => void copy()}>copy link</Button>
+              <Button
+                onClick={() => {
+                  analytics.track('share_clicked', {});
+                  void copy();
+                }}
+              >
+                copy link
+              </Button>
             </div>
           </PopoverContent>
         </Popover>

@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import * as s from './schema';
 import { applyOps } from './ops';
+import { parseApiBase, resolveSessionWsUrl } from './config';
+export interface KimoClientOptions {
+  credentials?: RequestCredentials;
+  wsOrigin?: string;
+}
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -12,9 +17,12 @@ export class ApiError extends Error {
 }
 export class KimoClient {
   constructor(
-    public base = 'http://localhost:8787',
+    public readonly base: string,
     private request: typeof fetch = globalThis.fetch.bind(globalThis),
-  ) {}
+    private readonly options: KimoClientOptions = {},
+  ) {
+    this.base = parseApiBase(base);
+  }
   private async json<T>(
     path: string,
     schema: z.ZodType<T>,
@@ -23,8 +31,13 @@ export class KimoClient {
   ): Promise<T> {
     const response = await this.request(this.base + path, {
       method: body === undefined ? 'GET' : 'POST',
+      credentials: this.options.credentials ?? 'include',
+      redirect: 'error',
       ...(signal ? { signal } : {}),
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        Accept: 'application/json',
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok)
@@ -68,6 +81,8 @@ export class KimoClient {
       `${this.base}/v1/sessions/${encodeURIComponent(id)}/messages`,
       {
         method: 'POST',
+        credentials: this.options.credentials ?? 'include',
+        redirect: 'error',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
           s.messageRequestSchema.parse({ text, attachments }),
@@ -177,7 +192,7 @@ export class KimoClient {
     onEvent: (event: s.ServerEvent) => void,
     onClose?: () => void,
   ): WebSocket {
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(resolveSessionWsUrl(url, this.options.wsOrigin));
     ws.onmessage = (message) => {
       try {
         const raw: unknown = JSON.parse(String(message.data));

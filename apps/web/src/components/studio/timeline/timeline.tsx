@@ -506,6 +506,7 @@ export function TimelineEditor(props: TimelineEditorProps) {
               zoom,
               current.ids,
               playhead,
+              props.beats,
             )
           : { time: baselineTime + delta, guide: undefined };
         setGuide(snapped.guide);
@@ -532,7 +533,7 @@ export function TimelineEditor(props: TimelineEditorProps) {
         );
       } else {
         const snap = snapping
-          ? snapDelta(baseline, current.ids, delta, zoom, playhead)
+          ? snapDelta(baseline, current.ids, delta, zoom, playhead, props.beats)
           : { delta, guide: undefined };
         delta = snap.delta;
         setGuide(snap.guide);
@@ -762,6 +763,7 @@ export function TimelineEditor(props: TimelineEditorProps) {
             >
               <TrackRow
                 project={project}
+                beats={props.beats}
                 assets={assets}
                 editing={editing}
                 selection={selection}

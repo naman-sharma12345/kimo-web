@@ -1,3 +1,4 @@
+import type { TimelineBeat } from './types';
 import type { Clip, KimoProject, Track } from '@kimo/client';
 export const HEADER_WIDTH = 160;
 export const RULER_HEIGHT = 28;
@@ -91,16 +92,48 @@ export function linkedSelection(
     ]),
   ];
 }
+/** Validate supplied project-clock beats against the current clip identity and visible span. */
+export function validTimelineBeats(
+  project: KimoProject,
+  beats: readonly TimelineBeat[] = [],
+  excluded: readonly string[] = [],
+): TimelineBeat[] {
+  const moving = new Set(excluded);
+  const seen = new Set<string>();
+  return beats.filter((beat) => {
+    const clip = project.clips[beat.clipId];
+    const track = project.tracks.find((item) => item.id === beat.trackId);
+    if (
+      !clip ||
+      !track ||
+      track.hidden ||
+      moving.has(clip.id) ||
+      clip.trackId !== beat.trackId ||
+      clip.audioRole !== 'music' ||
+      !['audio', 'video'].includes(clip.kind) ||
+      !Number.isFinite(beat.time) ||
+      beat.time < clip.start ||
+      beat.time >= clip.start + clip.duration
+    )
+      return false;
+    const identity = JSON.stringify([beat.trackId, beat.time]);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
 export function snapTime(
   project: KimoProject,
   value: number,
   zoom: number,
   moving: readonly string[],
   playhead: number,
+  beats: readonly TimelineBeat[] = [],
 ): { time: number; guide?: number } {
   const exclude = new Set(moving);
   const candidates = [
     playhead,
+    ...validTimelineBeats(project, beats, moving).map((beat) => beat.time),
     ...project.markers.map((m) => m.time),
     ...Object.values(project.clips)
       .filter((c) => !exclude.has(c.id))
@@ -120,13 +153,21 @@ export function snapDelta(
   delta: number,
   zoom: number,
   playhead: number,
+  beats: readonly TimelineBeat[] = [],
 ): { delta: number; guide?: number } {
   const choices = ids
     .flatMap((id) => {
       const c = project.clips[id];
       return c
         ? [c.start, c.start + c.duration].map((edge) => {
-            const snap = snapTime(project, edge + delta, zoom, ids, playhead);
+            const snap = snapTime(
+              project,
+              edge + delta,
+              zoom,
+              ids,
+              playhead,
+              beats,
+            );
             return { delta: snap.time - edge, guide: snap.guide };
           })
         : [];

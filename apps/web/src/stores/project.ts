@@ -3,6 +3,8 @@ import type { KimoProject, Op } from '@kimo/client';
 import { api } from '@/lib/api';
 import type { EditContext, EditingAPI } from '@/lib/editing';
 import { useEditing } from './editing';
+import { createIndexedDBEditPersistence } from '@/lib/editing/indexeddb';
+import { useStudio } from './studio';
 
 let activeId: string | null = null;
 function browserStorage(): EditContext['storage'] {
@@ -54,7 +56,10 @@ export const useProject = create<ProjectStore>((set, get) => {
       project,
       client: api,
       storage: browserStorage(),
-      online: () => typeof navigator === 'undefined' || navigator.onLine,
+      persistence: createIndexedDBEditPersistence(),
+      online: () =>
+        (typeof navigator === 'undefined' || navigator.onLine) &&
+        useStudio.getState().connection === 'connected',
     });
   }
   return {

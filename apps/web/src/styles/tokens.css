@@ -1,4 +1,17 @@
 @theme static {
+  --render-unprinted: rgb(8 8 9 / 0.45);
+  --phase9-grain-opacity: 0.035;
+  --phase9-glow-width: 1400px;
+  --phase9-glow-height: 520px;
+  --phase9-glow-blur: 40px;
+  --phase9-horizon: radial-gradient(
+    closest-side,
+    rgb(255 90 36 / 0.1),
+    rgb(255 90 36 / 0.03) 55%,
+    transparent 100%
+  );
+  --privacy-max-width: 680px;
+  --play-optical-offset: 1px;
   --render-frame-width: 640px;
   --render-frame-fade: 180ms;
   --render-sweep: 1000ms;

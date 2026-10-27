@@ -389,3 +389,17 @@ describe('exact public and installed Next overlay font routes', () => {
     }
   });
 });
+
+describe('exact privacy route', () => {
+  it('permits only GET/HEAD for the explicit policy page', () => {
+    expect(route('/privacy')).toEqual({
+      mock: false,
+      path: '/privacy',
+      port: 3106,
+    });
+    expect(route('/privacy', 'HEAD')).not.toBeNull();
+    expect(route('/privacy', 'POST')).toBeNull();
+    expect(route('/privacy/admin')).toBeNull();
+    expect(route('/privacy%2fadmin')).toBeNull();
+  });
+});

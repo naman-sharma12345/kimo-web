@@ -15,9 +15,10 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { BrandMark } from '@/components/landing/brand';
+import { diagnosticsTiming } from '@/lib/diagnostics';
 import { api } from '@/lib/api';
+import { createSessionRecovery } from '@/lib/session-recovery';
 import { navigationTransition } from '@/lib/navigation-transition';
-import { useSession } from '@/stores/session';
 import { useProject } from '@/stores/project';
 import { useUploads } from '@/lib/uploads';
 import { WarmupReel, type ReelAsset } from './warmup-reel';
@@ -51,10 +52,17 @@ export function WarmupScreen({ sessionId }: { sessionId: string }) {
   const [slow, setSlow] = useState(false);
   const [cancel, setCancel] = useState(false);
   const [unfolding, setUnfolding] = useState(false);
+  const [transportReady, setTransportReady] = useState(false);
   const [retry, setRetry] = useState(0);
   const [fallback, setFallback] = useState('');
   const [typed, setTyped] = useState('');
+  const warmupObservation = useRef<
+    ReturnType<typeof diagnosticsTiming.interval> | undefined
+  >(undefined);
   const socket = useRef<WebSocket | undefined>(undefined);
+  const recovery = useRef<ReturnType<typeof createSessionRecovery> | undefined>(
+    undefined,
+  );
   const localItems = useUploads((store) => store.items);
   const uploadSession = useUploads((store) => store.session);
   const items = uploadSession?.sessionId === sessionId ? localItems : [];
@@ -112,122 +120,87 @@ export function WarmupScreen({ sessionId }: { sessionId: string }) {
     return () => clearInterval(timer);
   }, [state.step, state.noticed]);
   useEffect(() => {
-    let disposed = false;
-    let connection: WebSocket | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let failures = 0;
-    let terminal = false;
-    let handshake: ReturnType<typeof setTimeout> | undefined;
+    let latestStatus = 'warming';
+    let active = true;
+    const observe = diagnosticsTiming.interval('warmup_duration');
+    warmupObservation.current = observe;
     setState(initialWarmupState);
-    function reconnect(url: string) {
-      clearTimeout(handshake);
-      if (disposed || terminal) return;
-      const delay = warmupTiming.reconnect[failures++];
-      if (delay === undefined) {
-        setState((current) => ({
-          ...current,
-          error: 'couldn’t connect to this session.',
-        }));
-        return;
-      }
-      timer = setTimeout(() => connect(url), delay);
-    }
-    function connect(url: string) {
-      if (disposed || terminal) return;
-      try {
-        connection = api.connect(
-          url,
-          (event) => {
-            if (disposed) return;
-            setState((current) => warmupEvent(current, event));
-            if (event.t === 'error') {
-              terminal = true;
-              connection?.close();
-            }
-            if (event.t === 'asset.added')
-              setAssets((current) => [
-                ...current.filter((asset) => asset.id !== event.asset.id),
-                event.asset,
-              ]);
-            if (event.t === 'project.ops')
-              void useProject
-                .getState()
-                .receive(sessionId, event.version, event.ops)
-                .catch(() => undefined);
-          },
-          () => reconnect(url),
-        );
-        socket.current = connection;
-        const current = connection;
-        current.onopen = () => {
-          failures = 0;
-          clearTimeout(handshake);
-        };
-        handshake = setTimeout(() => {
-          if (current.readyState !== WebSocket.OPEN) current.close();
-        }, warmupTiming.reconnect[2]);
-      } catch {
-        reconnect(url);
-      }
-    }
-    async function restore() {
-      const draft =
-        useSession.getState().draft ?? useSession.getState().restore();
-      if (draft?.sessionId === sessionId && draft.wsUrl) connect(draft.wsUrl);
-      try {
-        const snapshot = await api.session(sessionId);
-        if (disposed) return;
+    setUnfolding(false);
+    const owner = createSessionRecovery({
+      sessionId,
+      api,
+      onSnapshot(snapshot) {
+        if (
+          snapshot.project.version > useProject.getState().acknowledgedVersion
+        )
+          diagnosticsTiming.discard(sessionId);
+        latestStatus = snapshot.status;
+        observe(snapshot.status === 'warming' ? 'active' : 'reset');
         setAssets(snapshot.assets);
+        // The project store preserves same-project queued intent. Shell additionally
+        // restores its asset registry through the existing editing owner.
         useProject.getState().replace(snapshot.project);
-        if (snapshot.status === 'failed') {
-          terminal = true;
-          clearTimeout(timer);
-          connection?.close();
-          setState((current) => ({
-            ...current,
-            error: 'this session could not be started.',
-          }));
-          return;
-        }
         if (snapshot.status === 'rendering') {
           router.replace(`/render/${encodeURIComponent(sessionId)}`);
-          return;
+          return 'stop';
         }
-        if (snapshot.status === 'done' && snapshot.videoId) {
-          router.replace(`/v/${encodeURIComponent(snapshot.videoId)}`);
-          return;
-        }
-        if (
-          snapshot.status === 'editing' ||
-          snapshot.status === 'awaiting_review'
-        )
-          setState((current) => ({ ...current, step: 'ready', progress: 1 }));
-        if (!connection) {
-          if (snapshot.wsUrl) connect(snapshot.wsUrl);
+        if (snapshot.status === 'done') {
+          if (snapshot.videoId)
+            router.replace(`/v/${encodeURIComponent(snapshot.videoId)}`);
           else
             setState((current) => ({
               ...current,
-              error: 'this session has no live connection.',
+              error: 'this session has no finished video.',
             }));
+          return 'stop';
         }
-      } catch (error) {
-        if (!disposed && !connection)
-          setState((current) => ({
-            ...current,
-            error:
-              error instanceof Error
-                ? error.message
-                : 'couldn’t restore this session.',
-          }));
-      }
-    }
-    void restore();
+        return 'continue';
+      },
+      onEvent(event) {
+        setState((current) => warmupEvent(current, event));
+        if (event.t === 'error') recovery.current?.dispose();
+        if (event.t === 'asset.added')
+          setAssets((current) => [
+            ...current.filter((asset) => asset.id !== event.asset.id),
+            event.asset,
+          ]);
+        if (event.t === 'project.ops') {
+          const before = useProject.getState().acknowledgedVersion;
+          return useProject
+            .getState()
+            .receive(sessionId, event.version, event.ops)
+            .then(() => {
+              if (active)
+                diagnosticsTiming.applied(
+                  sessionId,
+                  before,
+                  useProject.getState().acknowledgedVersion,
+                  event,
+                );
+            });
+        }
+      },
+      onStatus(status) {
+        setTransportReady(status === 'connected');
+        if (status !== 'connected') setUnfolding(false);
+        if (
+          status === 'connected' &&
+          (latestStatus === 'editing' || latestStatus === 'awaiting_review')
+        )
+          setState((current) => ({ ...current, step: 'ready', progress: 1 }));
+      },
+      onSocket(current) {
+        socket.current = current;
+      },
+      onFatal(failure) {
+        setState((current) => ({ ...current, error: failure.message }));
+      },
+    });
+    recovery.current = owner;
     return () => {
-      disposed = true;
-      clearTimeout(timer);
-      clearTimeout(handshake);
-      connection?.close();
-      socket.current = undefined;
+      active = false;
+      owner.dispose();
+      if (recovery.current === owner) recovery.current = undefined;
     };
   }, [sessionId, retry, router]);
   useEffect(() => {
@@ -240,7 +213,8 @@ export function WarmupScreen({ sessionId }: { sessionId: string }) {
       .catch(() => undefined);
   }, [state.step, assets, router, sessionId]);
   useEffect(() => {
-    if (state.step !== 'ready' || state.error) return;
+    if (state.step !== 'ready' || state.error || !transportReady) return;
+    warmupObservation.current?.('done');
     const beat = setTimeout(
       () => setUnfolding(true),
       reduced ? 0 : warmupTiming.beat,
@@ -261,11 +235,13 @@ export function WarmupScreen({ sessionId }: { sessionId: string }) {
       clearTimeout(transition);
       cancelNavigation?.();
     };
-  }, [state.step, state.error, reduced, router, sessionId]);
+  }, [state.step, state.error, transportReady, reduced, router, sessionId]);
   function stop() {
+    setTransportReady(false);
+    setUnfolding(false);
     if (socket.current?.readyState === WebSocket.OPEN)
       socket.current.send(JSON.stringify({ t: 'pause' }));
-    socket.current?.close();
+    recovery.current?.dispose();
     router.replace('/');
   }
   if (state.error)

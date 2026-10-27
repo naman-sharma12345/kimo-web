@@ -1,3 +1,4 @@
+import type { TimelineBeat } from './types';
 import type { Asset, Clip, Track } from '@kimo/client';
 import { clipLabel } from '@/lib/editing/display';
 import { sourceClock } from './geometry';
@@ -6,6 +7,7 @@ import type { ClipVisual } from './animation';
 import { hoverTint } from './color';
 export interface TrackPalette {
   panel: string;
+  beat: string;
   text: string;
   label: string;
   wave: string;
@@ -33,6 +35,7 @@ export function readPalette(element: HTMLElement): TrackPalette {
   const font = `${get('--weight-12')} ${get('--t-11')} ${get('--font-sans')}`;
   return {
     panel: get('--ink-1'),
+    beat: get('--cream-16'),
     text: get('--cream-100'),
     label: get('--cream-60'),
     wave: get('--cream-38'),
@@ -76,6 +79,7 @@ export function drawTrack(
   ctx: CanvasRenderingContext2D,
   options: {
     clips: readonly Clip[];
+    beats?: readonly TimelineBeat[];
     track: Track;
     assets: readonly Asset[];
     width: number;
@@ -213,4 +217,34 @@ export function drawTrack(
       ctx.restore();
     }
   }
+  // One pass over actual supplied ticks on this bounded canvas, not a new animation loop.
+  const seen = new Set<number>();
+  ctx.save();
+  ctx.strokeStyle = p.beat;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  let hasBeats = false;
+  for (const beat of options.beats ?? []) {
+    const clip = clips.find((item) => item.id === beat.clipId);
+    const x = beat.time * zoom - origin;
+    if (
+      !clip ||
+      clip.audioRole !== 'music' ||
+      clip.trackId !== track.id ||
+      beat.trackId !== track.id ||
+      !Number.isFinite(beat.time) ||
+      beat.time < clip.start ||
+      beat.time >= clip.start + clip.duration ||
+      x < 0 ||
+      x >= width ||
+      seen.has(beat.time)
+    )
+      continue;
+    seen.add(beat.time);
+    hasBeats = true;
+    ctx.moveTo(x, 22);
+    ctx.lineTo(x, height - 8);
+  }
+  if (hasBeats) ctx.stroke();
+  ctx.restore();
 }

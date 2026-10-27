@@ -22,6 +22,14 @@ export function createAgentController(
   let state = createAgentState(reset);
   let disposed = false;
   let sequence = 0;
+  // Live presentation events remain available across repeated authoritative refreshes.
+  const liveHistory: { event: ServerEvent; receivedAtMs: number }[] = [];
+  const isHistoryEvent = (event: ServerEvent) =>
+    event.t === 'agent.status' ||
+    event.t === 'agent.action.start' ||
+    event.t === 'agent.action.end' ||
+    event.t === 'agent.message' ||
+    event.t === 'error';
   const listeners = new Set<() => void>();
   const id = () =>
     transport.makeId?.() ?? `user:${reset.sessionId}:${++sequence}`;
@@ -46,11 +54,74 @@ export function createAgentController(
     connection(connected: boolean) {
       publish({ type: 'connectionChanged', connected, id: id() });
     },
+    /** Presentation only. Omitted legacy history is a no-op, not an empty log. */
+    restoreHistory(events?: readonly ServerEvent[]) {
+      if (disposed || events === undefined) return;
+      const history = events.filter(isHistoryEvent);
+      // A snapshot includes the producer prefix already observed live. Replay
+      // only the unmatched live tail, or an older live status would win over it.
+      const recorded = new Set(history.map((event) => JSON.stringify(event)));
+      let overlap = -1;
+      liveHistory.forEach((entry, index) => {
+        if (recorded.has(JSON.stringify(entry.event))) overlap = index;
+      });
+      liveHistory.splice(0, overlap + 1);
+      let restored = createAgentState({ sessionId: reset.sessionId });
+      for (const entry of [
+        ...history.map((event) => ({
+          event,
+          receivedAtMs: 0,
+        })),
+        ...liveHistory,
+      ])
+        restored = agentReducer(restored, { type: 'receive', ...entry });
+      // Historical ACKs must never consume a note that is pending now. Local rows
+      // have no server ordering metadata; retain them verbatim, not fabricated ACKs.
+      const localItems = state.items.filter(
+        (item) => item.kind === 'user' || item.kind === 'system',
+      );
+      const original = localItems.filter(
+        (item) => item.id === `original:${reset.sessionId}`,
+      );
+      const restoredIds = new Set(restored.items.map((item) => item.id));
+      state = {
+        ...state,
+        ...restored,
+        connected: state.connected,
+        assets: state.assets,
+        diagnostics: state.diagnostics,
+        items: [
+          ...original,
+          ...restored.items,
+          ...state.items.filter(
+            (item) =>
+              !original.some((row) => row.id === item.id) &&
+              !restoredIds.has(item.id),
+          ),
+        ],
+        recordedActionIds: [
+          ...new Set([
+            ...state.recordedActionIds,
+            ...restored.recordedActionIds,
+          ]),
+        ],
+        responseToNote: state.responseToNote,
+        openGroupId: localItems.some(
+          (item) => item.kind === 'user' && item.interrupt === 'pending',
+        )
+          ? undefined
+          : restored.openGroupId,
+      };
+      listeners.forEach((listener) => listener());
+    },
     receive(event: ServerEvent) {
+      if (disposed) return;
+      const receivedAtMs = transport.now?.() ?? Date.now();
+      if (isHistoryEvent(event)) liveHistory.push({ event, receivedAtMs });
       publish({
         type: 'receive',
         event,
-        receivedAtMs: transport.now?.() ?? Date.now(),
+        receivedAtMs,
       });
       if (
         event.t === 'agent.message' &&

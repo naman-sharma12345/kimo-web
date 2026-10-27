@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { durations } from '@/lib/motion';
 import { LandingPage } from './landing-page';
+import { LandingBootstrap } from './landing-bootstrap';
 import { ToastProvider } from '@/components/ui/toast';
 const mocks = vi.hoisted(() => ({
   push: vi.fn(),
@@ -51,6 +52,23 @@ beforeEach(() => {
   mocks.startSession.mockRejectedValue(new Error('offline'));
 });
 describe('landing interactions', () => {
+  it('shows the exact privacy warning and real policy link', () => {
+    render(
+      <ToastProvider>
+        <LandingPage />
+      </ToastProvider>,
+    );
+    expect(
+      screen.getByText(
+        /by sending, you agree that your files are processed by ai models\. don’t upload anything private\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'privacy' })).toHaveAttribute(
+      'href',
+      '/privacy',
+    );
+  });
+
   it('sample chips fill but do not send', () => {
     render(
       <ToastProvider>
@@ -201,5 +219,191 @@ describe('landing navigation safety', () => {
     });
     expect(transition.native).not.toHaveBeenCalled();
     expect(mocks.push).toHaveBeenCalledExactlyOnceWith('/warmup/session%2Fid');
+  });
+});
+
+describe('activated landing handoff', () => {
+  it('hands real bootstrap input and files to the real page and sends only once', async () => {
+    let resolve: (components: {
+      Page: typeof LandingPage;
+      Providers: typeof ToastProvider;
+    }) => void = () => {};
+    const pending = new Promise<{
+      Page: typeof LandingPage;
+      Providers: typeof ToastProvider;
+    }>((yes) => {
+      resolve = yes;
+    });
+    const load = vi.fn(() => pending);
+    render(<LandingBootstrap loadInteraction={load} />);
+    const editor = screen.getByRole('textbox', { name: 'describe your video' });
+    editor.focus();
+    fireEvent.change(editor, { target: { value: 'first and final text' } });
+    const file = new File(['video'], 'handoff.mp4', { type: 'video/mp4' });
+    fireEvent.drop(window, { dataTransfer: { files: [file] } });
+    fireEvent.keyDown(editor, { key: 'Enter' });
+    fireEvent.keyDown(editor, { key: 'Enter' });
+    expect(mocks.startSession).not.toHaveBeenCalled();
+    await act(async () =>
+      resolve({ Page: LandingPage, Providers: ToastProvider }),
+    );
+    await waitFor(() => expect(mocks.startSession).toHaveBeenCalledTimes(1));
+    expect(mocks.add).toHaveBeenCalledExactlyOnceWith([file]);
+    expect(mocks.startSession).toHaveBeenCalledWith({
+      prompt: 'first and final text',
+      aspect: 'auto',
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+  it('removes bootstrap global handlers after handoff so paste and keyboard events are not doubled', async () => {
+    render(
+      <LandingBootstrap
+        loadInteraction={async () => ({
+          Page: LandingPage,
+          Providers: ToastProvider,
+        })}
+      />,
+    );
+    await act(async () =>
+      fireEvent.change(
+        screen.getByRole('textbox', { name: 'describe your video' }),
+        { target: { value: 'hello' } },
+      ),
+    );
+    const file = new File(['video'], 'after.mp4', { type: 'video/mp4' });
+    fireEvent.paste(window, { clipboardData: { files: [file] } });
+    expect(mocks.add).toHaveBeenCalledExactlyOnceWith([file]);
+    expect(mocks.startSession).not.toHaveBeenCalled();
+  });
+  it('keeps initial image previews valid across StrictMode rehearsal and revokes on real unmount', async () => {
+    const create = vi.fn(() => 'blob:handoff');
+    const revoke = vi.fn();
+    vi.stubGlobal(
+      'URL',
+      class extends URL {
+        static createObjectURL = create;
+        static revokeObjectURL = revoke;
+      },
+    );
+    const file = new File(['image'], 'photo.png', { type: 'image/png' });
+    const view = render(
+      <React.StrictMode>
+        <ToastProvider>
+          <LandingPage activated initialFiles={[file]} />
+        </ToastProvider>
+      </React.StrictMode>,
+    );
+    await act(async () => {});
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(revoke).not.toHaveBeenCalled();
+    view.unmount();
+    await act(async () => {});
+    expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:handoff');
+    vi.unstubAllGlobals();
+  });
+  it('restores prompt and selection without an activation POST or entrance replay', () => {
+    const { container } = render(
+      <ToastProvider>
+        <LandingPage
+          activated
+          initialPrompt="keep this selection"
+          initialFocus={{
+            name: 'describe your video',
+            start: 2,
+            end: 7,
+            direction: 'backward',
+            scrollTop: 0,
+          }}
+        />
+      </ToastProvider>,
+    );
+    const editor = screen.getByRole('textbox', {
+      name: 'describe your video',
+    }) as HTMLTextAreaElement;
+    expect(editor).toHaveValue('keep this selection');
+    expect(editor).toHaveFocus();
+    expect(editor.selectionStart).toBe(2);
+    expect(editor.selectionEnd).toBe(7);
+    expect(editor.selectionDirection).toBe('backward');
+    expect(container.querySelector('.landing-page')).toHaveAttribute(
+      'data-activated',
+      'true',
+    );
+    expect(mocks.startSession).not.toHaveBeenCalled();
+  });
+  it('imports attachments once and executes an explicit valid send once under StrictMode', async () => {
+    const file = new File(['video'], 'clip.mp4', { type: 'video/mp4' });
+    render(
+      <React.StrictMode>
+        <ToastProvider>
+          <LandingPage
+            activated
+            initialPrompt="my clip"
+            initialFiles={[file]}
+            initialSend
+          />
+        </ToastProvider>
+      </React.StrictMode>,
+    );
+    await waitFor(() => expect(mocks.startSession).toHaveBeenCalledTimes(1));
+    expect(mocks.add).toHaveBeenCalledExactlyOnceWith([file]);
+    expect(mocks.startSession).toHaveBeenCalledWith({
+      prompt: 'my clip',
+      aspect: 'auto',
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole('textbox', { name: 'describe your video' }),
+      ).not.toBeDisabled(),
+    );
+    expect(screen.getByText('clip.mp4')).toBeInTheDocument();
+    expect(
+      screen.getByRole('textbox', { name: 'describe your video' }),
+    ).toHaveValue('my clip');
+  });
+  it('never submits an empty handoff intent or rejected-only attachments', async () => {
+    const file = new File(['x'], 'bad.exe', {
+      type: 'application/octet-stream',
+    });
+    render(
+      <ToastProvider>
+        <LandingPage activated initialFiles={[file]} initialSend />
+      </ToastProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'bad.exe can’t be used',
+      ),
+    );
+    expect(mocks.startSession).not.toHaveBeenCalled();
+  });
+  it('opens the settings action that triggered activation', async () => {
+    render(
+      <ToastProvider>
+        <LandingPage activated initialControl="aspect ratio: auto" />
+      </ToastProvider>,
+    );
+    expect(await screen.findByRole('menu')).toBeInTheDocument();
+    expect(mocks.startSession).not.toHaveBeenCalled();
+  });
+  it('preserves sign-in activation and attachment validation feedback', async () => {
+    render(
+      <ToastProvider>
+        <LandingPage
+          activated
+          initialSignIn
+          initialErrors={[
+            'bad.exe can’t be used: that file type isn’t supported yet',
+          ]}
+        />
+      </ToastProvider>,
+    );
+    expect(await screen.findByRole('dialog')).toHaveTextContent(
+      'accounts are coming soon.',
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'bad.exe can’t be used',
+    );
+    expect(mocks.startSession).not.toHaveBeenCalled();
   });
 });

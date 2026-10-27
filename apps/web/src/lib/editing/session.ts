@@ -1,9 +1,7 @@
-import { z } from 'zod';
 import {
   ApiError,
   applyOps,
   opSchema,
-  projectSchema,
   type KimoProject,
   type Op,
   type SessionSnapshot,
@@ -17,7 +15,15 @@ import {
   historyOps,
   type HistoryRecord,
 } from './history';
+import {
+  EditPersistenceError,
+  validateOutbox,
+  type EditOutboxBinding,
+  type EditOutboxRecord,
+} from './persistence';
 import type {
+  EditReadiness,
+  EditPersistenceStatus,
   AuthoritativeGroup,
   BeginEdit,
   EditContext,
@@ -38,34 +44,6 @@ type Pending = EditGroup & {
   onAck?: (record: HistoryRecord) => void;
 };
 const clone = <T>(value: T): T => structuredClone(value);
-const sourceSchema = z.enum([
-  'timeline',
-  'inspector',
-  'viewer',
-  'captions',
-  'keyboard',
-  'history',
-  'assets',
-]);
-const outboxSchema = z.object({
-  format: z.literal(1),
-  sessionId: z.string().min(1),
-  projectId: z.string().min(1),
-  baseVersion: z.number().int().nonnegative().safe(),
-  groups: z.array(
-    z.object({
-      id: z.string().min(1),
-      label: z.string(),
-      source: sourceSchema,
-      ops: z.array(opSchema),
-      status: z.enum(['unsent', 'failed', 'unknown']),
-      baseVersion: z.number().int().nonnegative().safe().optional(),
-      acceptedVersion: z.number().int().nonnegative().safe().optional(),
-      intentBaseline: projectSchema.optional(),
-      intentOps: z.array(opSchema).optional(),
-    }),
-  ),
-});
 /** One session, no sockets, no timers, no global network listeners. Parent supplies the single event stream. */
 export function createEditingSession(context: EditContext): EditingAPI {
   let acknowledged = clone(context.project);
@@ -74,7 +52,13 @@ export function createEditingSession(context: EditContext): EditingAPI {
   let draft:
     (NonNullable<EditState['draft']> & { baseline: KimoProject }) | null = null;
   let disposed = false;
-  let storageAvailable = context.storage !== undefined;
+  let storageAvailable = false;
+  let persistenceStatus: EditPersistenceStatus = 'hydrating';
+  let binding: EditOutboxBinding | undefined;
+  let saveTail: Promise<void> = Promise.resolve();
+  let dirtyGeneration = 0;
+  let savedGeneration = 0;
+  let closeTask: Promise<void> | undefined;
   let error: string | undefined;
   let outboxUnreadable = false;
   let cachedState: EditState | null = null;
@@ -93,7 +77,7 @@ export function createEditingSession(context: EditContext): EditingAPI {
   const settled = new Map<string, number>();
   let chain: Promise<void> = Promise.resolve();
   let snapshotRequest: Promise<void> | null = null;
-  const key = `kimo:editing:1:${encodeURIComponent(context.sessionId)}:${encodeURIComponent(context.project.id)}`;
+
   const makeId = context.makeId ?? (() => crypto.randomUUID());
   const online = () => context.online?.() ?? true;
   const assertLive = () => {
@@ -101,55 +85,74 @@ export function createEditingSession(context: EditContext): EditingAPI {
   };
   const message = (cause: unknown) =>
     cause instanceof Error ? cause.message : String(cause);
-  function persist() {
-    if (outboxUnreadable) {
-      storageAvailable = false;
-      return;
-    }
-    if (!context.storage) {
-      storageAvailable = false;
-      return;
-    }
-    try {
-      if (!pending.length) context.storage.removeItem(key);
-      else
-        context.storage.setItem(
-          key,
-          JSON.stringify({
-            format: 1,
-            sessionId: context.sessionId,
-            projectId: acknowledged.id,
-            baseVersion: acknowledged.version,
-            groups: pending.map(
-              ({
-                id,
-                label,
-                source,
-                ops,
-                status,
-                baseVersion,
-                acceptedVersion,
-                intentBaseline,
-                intentOps,
-              }) => ({
-                id,
-                label,
-                source,
-                ops,
-                status: status === 'sending' ? 'unknown' : status,
-                ...(baseVersion === undefined ? {} : { baseVersion }),
-                ...(acceptedVersion === undefined ? {} : { acceptedVersion }),
-                ...(intentBaseline === undefined
-                  ? {}
-                  : { intentBaseline, intentOps }),
-              }),
-            ),
-          }),
-        );
-      storageAvailable = true;
-    } catch {
-      storageAvailable = false;
-    }
+  function storageFailure(cause: unknown) {
+    storageAvailable = false;
+    if (cause instanceof EditPersistenceError) persistenceStatus = cause.status;
+    else if (
+      persistenceStatus !== 'locked' &&
+      persistenceStatus !== 'unreadable'
+    )
+      persistenceStatus = 'unavailable';
+    error = `Editing storage unavailable: ${message(cause)}`;
+    emit();
+  }
+  function envelope(): EditOutboxRecord {
+    return structuredClone({
+      format: 2,
+      sessionId: context.sessionId,
+      projectId: acknowledged.id,
+      baseVersion: acknowledged.version,
+      groups: pending.map(
+        ({
+          id,
+          label,
+          source,
+          ops,
+          status,
+          baseVersion,
+          acceptedVersion,
+          intentBaseline,
+          intentOps,
+        }) => ({
+          id,
+          label,
+          source,
+          ops,
+          status: status === 'sending' ? ('unknown' as const) : status,
+          ...(baseVersion === undefined ? {} : { baseVersion }),
+          ...(acceptedVersion === undefined ? {} : { acceptedVersion }),
+          ...(intentBaseline === undefined
+            ? {}
+            : { intentBaseline, intentOps }),
+        }),
+      ),
+    });
+  }
+  function persist(): Promise<void> {
+    const record = envelope();
+    const generation = ++dirtyGeneration;
+    const write = saveTail.then(async () => {
+      if (!binding || !storageAvailable || outboxUnreadable)
+        throw new Error('Durable editing storage is unavailable');
+      await binding.save(record);
+      savedGeneration = generation;
+      if (!disposed) emit();
+    });
+    saveTail = write.catch((cause) => {
+      if (!disposed) storageFailure(cause);
+    });
+    // All sync transition callers are safe; async dispatch callers still see rejection.
+    void write.catch(() => undefined);
+    return write;
+  }
+  function assertEditable() {
+    assertLive();
+    if (persistenceStatus === 'hydrating' || persistenceStatus === 'locked')
+      throw new Error(
+        persistenceStatus === 'locked'
+          ? 'This project is being edited in another tab'
+          : 'Editing storage is still loading',
+      );
   }
   function projection(): KimoProject {
     let project = acknowledged;
@@ -200,24 +203,34 @@ export function createEditingSession(context: EditContext): EditingAPI {
     if (cachedState) return cachedState;
     const saveStatus = disposed
       ? 'disposed'
-      : pending.some((g) => g.status === 'unknown')
-        ? 'unknown'
-        : outboxUnreadable ||
-            pending.some((g) => g.status === 'failed') ||
-            (pending.length && !storageAvailable)
+      : persistenceStatus === 'hydrating'
+        ? 'pending'
+        : !storageAvailable || dirtyGeneration !== savedGeneration
           ? 'unsaved'
-          : pending.length
-            ? online()
-              ? 'pending'
-              : 'offline'
-            : draft
-              ? 'draft'
-              : [...received.keys()].some(
-                    (version) => version > acknowledged.version,
-                  )
-                ? 'pending'
-                : 'saved';
+          : pending.some((g) => g.status === 'unknown')
+            ? 'unknown'
+            : outboxUnreadable ||
+                pending.some((g) => g.status === 'failed') ||
+                (pending.length && !storageAvailable)
+              ? 'unsaved'
+              : pending.length
+                ? online()
+                  ? 'pending'
+                  : 'offline'
+                : draft
+                  ? 'draft'
+                  : [...received.keys()].some(
+                        (version) => version > acknowledged.version,
+                      )
+                    ? 'pending'
+                    : 'saved';
     cachedState = {
+      persistenceStatus: disposed ? 'disposed' : persistenceStatus,
+      persistencePending: dirtyGeneration !== savedGeneration,
+      editingEnabled:
+        !disposed && !['hydrating', 'locked'].includes(persistenceStatus),
+      dispatchEnabled:
+        !disposed && storageAvailable && persistenceStatus === 'ready',
       project: projection(),
       acknowledged,
       acknowledgedVersion: acknowledged.version,
@@ -241,9 +254,17 @@ export function createEditingSession(context: EditContext): EditingAPI {
       saveStatus,
       storageAvailable,
       canUndo:
-        !!userUndo[userUndo.length - 1]?.available && !pending.length && !draft,
+        storageAvailable &&
+        dirtyGeneration === savedGeneration &&
+        !!userUndo[userUndo.length - 1]?.available &&
+        !pending.length &&
+        !draft,
       canRedo:
-        !!userRedo[userRedo.length - 1]?.available && !pending.length && !draft,
+        storageAvailable &&
+        dirtyGeneration === savedGeneration &&
+        !!userRedo[userRedo.length - 1]?.available &&
+        !pending.length &&
+        !draft,
       history: history.map(({ id, label, author, actionId, available }) => ({
         id,
         label,
@@ -292,6 +313,7 @@ export function createEditingSession(context: EditContext): EditingAPI {
     safeCall(() => context.assetsChanged?.(assets));
     for (const version of received.keys())
       if (version <= acknowledged.version) received.delete(version);
+    if (storageAvailable) void persist();
     emit();
   }
   async function refresh() {
@@ -425,6 +447,8 @@ export function createEditingSession(context: EditContext): EditingAPI {
       }
   }
   async function receiveAuthoritative(group: AuthoritativeGroup) {
+    await readiness;
+    if (disposed) return;
     assertLive();
     if (!Number.isSafeInteger(group.version) || group.version < 0)
       throw new Error(
@@ -438,6 +462,7 @@ export function createEditingSession(context: EditContext): EditingAPI {
           group.version,
           beforeVersion.get(group.version) ?? own.before ?? acknowledged,
         );
+        await saveTail;
         emit();
       }
       return;
@@ -487,59 +512,32 @@ export function createEditingSession(context: EditContext): EditingAPI {
       error?.startsWith('Snapshot unavailable:')
     )
       error = undefined;
+    await saveTail;
     emit();
   }
   async function send(group: Pending): Promise<EditResult> {
     if (disposed) return { id: group.id, status: 'cancelled' };
-    if (!online()) {
-      persist();
-      emit();
-      return { id: group.id, status: 'queued' };
-    }
+    if (!storageAvailable)
+      return {
+        id: group.id,
+        status: 'failed',
+        error: error ?? 'Durable editing storage unavailable',
+      };
+    if (!online()) return { id: group.id, status: 'queued' };
     if (
       pending.some(
         (g) => g !== group && ['unknown', 'failed'].includes(g.status),
       )
     )
       return { id: group.id, status: 'queued' };
-    group.status = 'sending';
-    group.before = clone(acknowledged);
-    group.baseVersion = acknowledged.version;
-    persist();
-    emit();
-    let response: { version: number };
     let dispatched = false;
-    const requestOptions = {
-      signal: abort.signal,
-      ...(context.mutationIdentity ? { clientMutationId: group.id } : {}),
-    };
-    let before = group.before;
-    try {
-      group.ops = validateCommands(
-        acknowledged,
-        group.intentBaseline
-          ? rebaseCommands(
-              group.intentBaseline,
-              acknowledged,
-              group.intentOps ?? group.ops,
-            )
-          : group.ops,
-        assets,
-      );
-      try {
-        dispatched = true;
-        response = await context.client.ops(
-          context.sessionId,
-          group.ops,
-          acknowledged.version,
-          requestOptions,
-        );
-      } catch (cause) {
-        if (!(cause instanceof ApiError) || cause.status !== 409) throw cause;
-        dispatched = false;
-        await refresh();
-        if (disposed) return { id: group.id, status: 'cancelled' };
-        group.ops = validateCommands(
+    let before = clone(acknowledged);
+    const prepare = async (): Promise<boolean> => {
+      while (!disposed && pending.includes(group) && !settled.has(group.id)) {
+        if (!storageAvailable)
+          throw new Error('Durable editing storage unavailable');
+        const base = clone(acknowledged);
+        const ops = validateCommands(
           acknowledged,
           group.intentBaseline
             ? rebaseCommands(
@@ -550,21 +548,71 @@ export function createEditingSession(context: EditContext): EditingAPI {
             : group.ops,
           assets,
         );
-        before = clone(acknowledged);
-        group.before = before;
-        group.baseVersion = acknowledged.version;
-        group.suppressProjection = false;
+        group.ops = clone(ops);
+        group.before = base;
+        group.baseVersion = base.version;
+        group.status = 'sending';
+        before = base;
+        await persist(); // exact payload/base is UNKNOWN durably before invocation
+        if (disposed || settled.has(group.id) || !pending.includes(group))
+          return false;
+        if (!storageAvailable)
+          throw new Error('Durable editing storage unavailable');
+        if (!online()) {
+          group.status = 'unsent';
+          await persist();
+          return false;
+        }
+        if (base.version === acknowledged.version) return true;
+      }
+      return false;
+    };
+    const requestOptions = {
+      signal: abort.signal,
+      ...(context.mutationIdentity ? { clientMutationId: group.id } : {}),
+    };
+    const invoke = async (): Promise<{ version: number } | undefined> => {
+      while (await prepare()) {
+        // prepare's resolution is itself an async boundary: fence again HERE.
+        if (disposed || !pending.includes(group) || settled.has(group.id))
+          return;
+        if (!storageAvailable)
+          throw new Error('Durable editing storage unavailable');
+        if (!online() || group.baseVersion !== acknowledged.version) continue;
         dispatched = true;
-        response = await context.client.ops(
+        return context.client.ops(
           context.sessionId,
           group.ops,
-          acknowledged.version,
+          group.baseVersion,
           requestOptions,
         );
       }
+    };
+    try {
+      let response: { version: number } | undefined;
+      try {
+        response = await invoke();
+      } catch (cause) {
+        if (!(cause instanceof ApiError) || cause.status !== 409) throw cause;
+        dispatched = false;
+        await refresh();
+        group.suppressProjection = false;
+        response = await invoke();
+      }
+      if (!response)
+        return {
+          id: group.id,
+          status: disposed
+            ? 'cancelled'
+            : settled.has(group.id)
+              ? 'acknowledged'
+              : 'queued',
+        };
       if (disposed) return { id: group.id, status: 'cancelled' };
-      if (settled.has(group.id))
+      if (settled.has(group.id)) {
+        await saveTail;
         return { id: group.id, status: 'acknowledged' };
+      }
       if (
         !Number.isSafeInteger(response.version) ||
         response.version <= (group.baseVersion ?? -1)
@@ -572,6 +620,9 @@ export function createEditingSession(context: EditContext): EditingAPI {
         throw new Error('Write acknowledgement did not advance server version');
       group.acceptedVersion = response.version;
       ownVersions.set(response.version, group.id);
+      // Persist acceptance before any further snapshot await. Failure cannot undo proven acceptance.
+      await persist().catch(() => undefined);
+      if (disposed) return { id: group.id, status: 'cancelled' };
       if (response.version === acknowledged.version + 1) {
         rememberBefore(response.version);
         before = clone(acknowledged);
@@ -584,39 +635,51 @@ export function createEditingSession(context: EditContext): EditingAPI {
             'Acknowledged write is ahead of the available snapshot',
           );
       }
-      const preimage = beforeVersion.get(response.version) ?? before;
-      confirm(group, response.version, preimage);
+      confirm(
+        group,
+        response.version,
+        beforeVersion.get(response.version) ?? before,
+      );
       received.delete(response.version);
       if (ownVersions.size > 128) {
         const first = ownVersions.keys().next().value;
         if (first !== undefined) ownVersions.delete(first);
       }
-      error = undefined;
-      persist();
+      await saveTail;
+      if (storageAvailable) error = undefined;
       emit();
       return { id: group.id, status: 'acknowledged' };
     } catch (cause) {
       if (disposed) return { id: group.id, status: 'cancelled' };
-      if (settled.has(group.id))
+      if (settled.has(group.id)) {
+        await saveTail;
         return { id: group.id, status: 'acknowledged' };
-      // HTTP 4xx proves rejection. Transport/5xx/parse failures do not prove nonacceptance.
+      }
       const rejected =
         cause instanceof ApiError &&
         [400, 401, 403, 404, 409, 422, 429].includes(cause.status);
-      group.status = rejected || !dispatched ? 'failed' : 'unknown';
-      error = message(cause);
-      persist();
+      group.status = !dispatched
+        ? storageAvailable
+          ? 'failed'
+          : 'unsent'
+        : rejected
+          ? 'failed'
+          : 'unknown';
+      if (storageAvailable) error = message(cause);
+      await persist().catch(() => undefined);
       emit();
       return {
         id: group.id,
         status: group.status === 'unknown' ? 'unknown' : 'failed',
-        error,
+        error: error ?? message(cause),
       };
     }
   }
   function schedule(group: Pending): Promise<EditResult> {
     let result: EditResult = { id: group.id, status: 'queued' };
     const scheduled = chain.then(async () => {
+      await readiness;
+      await saveTail;
       if (pending.includes(group) && group.status === 'unsent')
         result = await send(group);
     });
@@ -633,7 +696,7 @@ export function createEditingSession(context: EditContext): EditingAPI {
     normalHistory = true,
     onAck?: Pending['onAck'],
   ): Promise<EditResult> {
-    assertLive();
+    assertEditable();
     if (!ops.length) return Promise.resolve({ id, status: 'cancelled' });
     const baseline = projection();
     const parsed = validateCommands(baseline, ops, assets);
@@ -664,7 +727,7 @@ export function createEditingSession(context: EditContext): EditingAPI {
     return schedule(group);
   }
   function beginEdit(input: BeginEdit): string {
-    assertLive();
+    assertEditable();
     if (draft) throw new Error('Finish or cancel the active edit first');
     const baseline = projection();
     for (const id of input.clipIds) {
@@ -741,15 +804,17 @@ export function createEditingSession(context: EditContext): EditingAPI {
       return promise;
     }
   }
-  function editGroup(
+  async function editGroup(
     ops: readonly Op[],
     label: string,
     source: BeginEdit['source'] = 'inspector',
   ) {
+    await readiness;
     return enqueue(ops, label, source);
   }
   async function undoUser(): Promise<EditResult> {
-    assertLive();
+    await readiness;
+    assertEditable();
     const entry = userUndo[userUndo.length - 1];
     if (!entry || pending.length || draft)
       return { id: '', status: 'cancelled' };
@@ -772,7 +837,8 @@ export function createEditingSession(context: EditContext): EditingAPI {
     }
   }
   async function redoUser(): Promise<EditResult> {
-    assertLive();
+    await readiness;
+    assertEditable();
     const entry = userRedo[userRedo.length - 1];
     if (!entry || pending.length || draft)
       return { id: '', status: 'cancelled' };
@@ -795,6 +861,8 @@ export function createEditingSession(context: EditContext): EditingAPI {
     }
   }
   async function revertAgentGroup(actionId: string): Promise<EditResult> {
+    await readiness;
+    assertEditable();
     const entries = agentHistory.filter((entry) => entry.actionId === actionId);
     if (!entries.length)
       return {
@@ -850,64 +918,91 @@ export function createEditingSession(context: EditContext): EditingAPI {
     emit();
   }
   async function flush() {
+    await readiness;
     assertLive();
+    if (!storageAvailable) return;
     for (const group of pending)
       if (group.status === 'unsent') await schedule(group);
     await chain;
   }
   function dispose() {
     if (disposed) return;
+    disposed = true;
     for (const group of pending)
       if (group.status === 'sending') group.status = 'unknown';
-    persist();
-    disposed = true;
     abort.abort();
     draft = null;
     cachedState = null;
     const state = getState();
     for (const listener of listeners) safeCall(() => listener(state));
     listeners.clear();
+    closeTask = readiness
+      .then(() => saveTail)
+      .then(() => binding?.close())
+      .then(() => undefined);
   }
-  if (context.storage) {
+  const readiness: Promise<EditReadiness> = (async () => {
+    let unavailableDuringOpen = false;
     try {
-      const raw = context.storage.getItem(key);
-      if (raw) {
-        const saved = outboxSchema.parse(JSON.parse(raw));
-        if (
-          saved.sessionId !== context.sessionId ||
-          saved.projectId !== acknowledged.id
-        )
-          throw new Error('Stored edits do not match this session');
-        if (
-          new Set(saved.groups.map((group) => group.id)).size !==
-          saved.groups.length
-        )
-          throw new Error('Stored edit IDs must be unique');
-        if (
-          saved.groups.some(
-            (group) =>
-              group.intentBaseline &&
-              group.intentBaseline.id !== acknowledged.id,
-          )
-        )
-          throw new Error('Stored intent belongs to another project');
+      await context.persistenceReadyAfter;
+      if (disposed) return { status: 'disposed' };
+      if (!context.persistence)
+        throw new EditPersistenceError(
+          'unavailable',
+          'Durable editing storage is not configured',
+        );
+      const opened = await context.persistence.open(
+        { sessionId: context.sessionId, projectId: context.project.id },
+        {
+          signal: abort.signal,
+          legacyStorage: context.storage,
+          onUnavailable: (cause) => {
+            unavailableDuringOpen = true;
+            if (!disposed) storageFailure(cause);
+          },
+        },
+      );
+      binding = opened;
+      if (disposed) {
+        await opened.close();
+        return { status: 'disposed' };
+      }
+      if (unavailableDuringOpen)
+        throw new Error('Editing storage became unavailable during hydration');
+      if (opened.record) {
+        const saved = validateOutbox(opened.record, {
+          sessionId: context.sessionId,
+          projectId: acknowledged.id,
+        });
         pending = saved.groups.map((group) => ({
           ...group,
           history: true,
           status:
-            saved.baseVersion > acknowledged.version ? 'unknown' : group.status,
+            saved.baseVersion > acknowledged.version ||
+            group.acceptedVersion !== undefined
+              ? 'unknown'
+              : group.status,
           ...(group.baseVersion === acknowledged.version
             ? { before: clone(acknowledged) }
             : {}),
         }));
       }
+      storageAvailable = true;
+      persistenceStatus = 'ready';
+      emit();
+      return { status: 'ready' };
     } catch (cause) {
-      outboxUnreadable = true;
-      storageAvailable = false;
-      error = message(cause);
+      if (disposed) return { status: 'disposed' };
+      outboxUnreadable =
+        cause instanceof EditPersistenceError && cause.status === 'unreadable';
+      storageFailure(cause);
+      await binding?.close();
+      return { status: persistenceStatus as EditReadiness['status'], error };
     }
-  }
+  })();
   return {
+    ready: () => readiness,
+    closed: () => closeTask ?? Promise.resolve(),
     getState,
     subscribe(listener) {
       if (disposed) {

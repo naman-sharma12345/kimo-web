@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Check } from 'lucide-react';
 import type { Render, SessionSnapshot } from '@kimo/client';
+import { diagnosticsTiming } from '@/lib/diagnostics';
 import { api as defaultApi } from '@/lib/api';
 import { spring } from '@/lib/motion';
 import { Button } from '@/components/ui/button';
@@ -124,6 +125,7 @@ export function RenderScreen({
   React.useEffect(() => {
     if (!jobId) return;
     let active = true;
+    const observe = diagnosticsTiming.interval('render_done');
     const reel = new RenderFrames(browserFrames, (value) => {
       if (active) setFrames(value);
     });
@@ -133,6 +135,14 @@ export function RenderScreen({
       api,
       jobId,
       (value) => {
+        if (!active) return;
+        observe(
+          value.status === 'queued' || value.status === 'rendering'
+            ? 'active'
+            : value.status === 'done'
+              ? 'done'
+              : 'reset',
+        );
         setRender(value);
         setConnection('');
         if (Number.isSafeInteger(value.frame) && value.frame > 0)

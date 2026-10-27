@@ -65,15 +65,20 @@ function transport(state: StudioState) {
 }
 export function observeCompositor(
   controller: CompositorController,
+  isLive: () => boolean = () => true,
 ): () => void {
-  let intent = transport(useStudio.getState());
+  const previewTransport = (state: StudioState) => ({
+    ...transport(state),
+    followKimo: isLive() && state.followKimo,
+  });
+  let intent = previewTransport(useStudio.getState());
   controller.setTransport(intent, useStudio.getState().playhead);
   const stopProject = useProject.subscribe((state, previous) => {
-    if (state.project && state.project !== previous.project)
+    if (isLive() && state.project && state.project !== previous.project)
       controller.updateProject(state.project);
   });
   const stopStudio = useStudio.subscribe((state, previous) => {
-    const next = transport(state);
+    const next = previewTransport(state);
     const seek = state.seekRevision !== previous.seekRevision;
     if (
       seek ||
@@ -96,6 +101,7 @@ export function StudioCompositor({
   assets,
   bridgeRef,
   debug = false,
+  historical = false,
   editing,
   onOpenText,
   activeTextId,
@@ -105,6 +111,7 @@ export function StudioCompositor({
   assets: Asset[];
   bridgeRef: React.RefObject<StudioCompositorHandle | null>;
   debug?: boolean;
+  historical?: boolean;
   editing?: EditingAPI | null;
   onOpenText?: (clipId: string) => void;
   activeTextId?: string | null;
@@ -117,7 +124,17 @@ export function StudioCompositor({
   const audioListeners = React.useRef(new Set<() => void>());
   const lastMaskIdentity = React.useRef('');
   const reducedFade = React.useRef<Animation | null>(null);
-  const initial = React.useRef({ project, assets });
+  // The lazy renderer and ingress callbacks must see the selected projection,
+  // including prop changes before initialization has completed.
+  const projection = React.useRef({ project, assets, historical });
+  projection.current = { project, assets, historical };
+  const liveAssets = React.useRef<readonly Asset[]>(assets);
+  const wasHistorical = React.useRef(historical);
+  const previousAssets = React.useRef(assets);
+  if (!historical && previousAssets.current !== assets)
+    liveAssets.current = assets;
+  previousAssets.current = assets;
+  const queuedEvents = React.useRef<ServerEvent[]>([]);
   const [metrics, setMetrics] = React.useState<ControllerMetrics | null>(null);
   const [overlay, setOverlay] = React.useState<ActionOverlay | null>(null);
   const [editAt, setEditAt] = React.useState<{
@@ -182,15 +199,16 @@ export function StudioCompositor({
       useStudio.getState().setPreviewStatus(failure.status);
     };
     let stop: (() => void) | undefined;
-    const queued: ServerEvent[] = [];
-    let latestAssets: readonly Asset[] = initial.current.assets;
+    const queued = queuedEvents.current;
+
     bridgeRef.current = {
       event: (event) => {
+        if (disposed || projection.current.historical) return;
         if (queued.length >= 64) queued.shift();
         queued.push(event);
       },
       assets: (next) => {
-        latestAssets = next;
+        if (!disposed) liveAssets.current = next;
       },
     };
     // No Pixi import or DOM work on the server. StrictMode cleanup guards lazy initialization.
@@ -201,8 +219,10 @@ export function StudioCompositor({
           getResource: (request) => current.getResource(request),
         });
         const current: CompositorController = new CompositorController({
-          project: initial.current.project,
-          assets: latestAssets,
+          project: projection.current.project,
+          assets: projection.current.historical
+            ? projection.current.assets
+            : liveAssets.current,
           filmstripCache: createFilmstripCache(
             () => useSession.getState().draft?.assetLocalMap ?? {},
           ),
@@ -226,14 +246,22 @@ export function StudioCompositor({
             window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ??
             false,
           onPlayback: (time, playing, fps) => {
+            if (disposed) return;
             useStudio.getState().publishPlayback(time, playing, fps);
             for (const listener of audioListeners.current) listener();
           },
-          onMetrics: setMetrics,
-          onOverlay: setOverlay,
-          onEditAt: setEditAt,
+          onMetrics: (next) => {
+            if (!disposed) setMetrics(next);
+          },
+          onOverlay: (next) => {
+            if (!disposed && !projection.current.historical) setOverlay(next);
+          },
+          onEditAt: (next) => {
+            if (!disposed && !projection.current.historical) setEditAt(next);
+          },
           // Only overlay geometry subscribes to scene changes, and not to each playback frame.
           onScene: (next) => {
+            if (disposed) return;
             const now = performance.now();
             if (
               !useStudio.getState().playing ||
@@ -246,16 +274,27 @@ export function StudioCompositor({
         });
         controller.current = current;
         bridgeRef.current = {
-          event: (event) => current.event(event),
-          assets: (next) => current.setAssets(next),
+          event: (event) => {
+            if (!disposed && !projection.current.historical)
+              current.event(event);
+          },
+          assets: (next) => {
+            if (disposed) return;
+            liveAssets.current = next;
+            if (!projection.current.historical) current.setAssets(next);
+          },
           getFrame: current.getFrame?.bind(current),
           getFilmstrip: current.getFilmstrip.bind(current),
           getWaveform: current.getWaveform.bind(current),
           getAudioLevel: current.getAudioLevel?.bind(current),
           getAudioCapabilities: current.getAudioCapabilities?.bind(current),
           getCompareCapability: current.getCompareCapability?.bind(current),
-          setEditingTextClip: current.setEditingTextClip?.bind(current),
+          setEditingTextClip: (clipId) => {
+            if (!disposed && !projection.current.historical)
+              current.setEditingTextClip?.(clipId);
+          },
           subscribeAudioLevel: (listener) => {
+            if (disposed) return () => undefined;
             audioListeners.current.add(listener);
             return () => {
               audioListeners.current.delete(listener);
@@ -263,10 +302,14 @@ export function StudioCompositor({
           },
         };
         const latestProject = useProject.getState().project;
-        if (latestProject?.id === initial.current.project.id)
+        if (
+          !projection.current.historical &&
+          latestProject?.id === projection.current.project.id
+        )
           current.updateProject(latestProject);
-        stop = observeCompositor(current);
-        queued.forEach((event) => current.event(event));
+        stop = observeCompositor(current, () => !projection.current.historical);
+        if (!projection.current.historical)
+          queued.forEach((event) => current.event(event));
         queued.length = 0;
         try {
           await current.init(canvas.current);
@@ -287,6 +330,8 @@ export function StudioCompositor({
       });
     return () => {
       disposed = true;
+      queued.length = 0;
+      audioListeners.current.clear();
       useStudio.getState().requestPlayback(false);
       useStudio.getState().setPreviewStatus('legacy');
       stop?.();
@@ -297,9 +342,38 @@ export function StudioCompositor({
       releaseOwnership();
     };
   }, [bridgeRef]);
-  React.useEffect(() => {
-    bridgeRef.current?.assets(assets);
-  }, [assets, bridgeRef]);
+  React.useLayoutEffect(() => {
+    const current = controller.current;
+    const exiting = wasHistorical.current && !historical;
+    const transitioning = wasHistorical.current !== historical;
+    wasHistorical.current = historical;
+    if (transitioning) {
+      queuedEvents.current.length = 0;
+      setOverlay(null);
+      setEditAt(null);
+      setScene(null);
+      setMaskEdge(undefined);
+      current?.setEditingTextClip?.(null);
+    }
+    if (!current) return;
+    const liveProject = useProject.getState().project;
+    current.updateProject(
+      !historical && liveProject?.id === project.id ? liveProject : project,
+    );
+    current.setAssets(historical ? assets : liveAssets.current);
+    if (transitioning) {
+      // Cancel any live follow interpolation before it can seek the detached cut.
+      current.setTransport(
+        {
+          ...transport(useStudio.getState()),
+          followKimo: !historical && useStudio.getState().followKimo,
+        },
+        useStudio.getState().playhead,
+      );
+    }
+    // Kept explicit: exit uses current live projection, never a cached entry snapshot.
+    if (exiting) lastSceneAt.current = -Infinity;
+  }, [project, assets, historical]);
   React.useEffect(() => {
     const node = host.current;
     if (!node) return;
@@ -325,7 +399,11 @@ export function StudioCompositor({
   React.useEffect(() => {
     if (activeTextId) useStudio.getState().requestPlayback(false);
   }, [activeTextId]);
-  const transformStart = useViewerTransform(editing, scale, setError);
+  const transformStart = useViewerTransform(
+    historical ? null : editing,
+    scale,
+    setError,
+  );
   const geometry = {
     width: project.width * scale,
     height: project.height * scale,
@@ -347,26 +425,31 @@ export function StudioCompositor({
         <canvas
           ref={canvas}
           className={styles.canvas}
-          aria-label="live project preview"
+          aria-label={
+            historical ? 'historical cut preview' : 'live project preview'
+          }
           data-testid="compositor-canvas"
         />
-        <CompositorOverlay
-          project={project}
-          assets={assets}
-          scene={scene}
-          overlay={overlay}
-          maskEdge={maskEdge}
-          displayScale={scale}
-          onTransformStart={transformStart}
-          onEditIntent={(intent) => {
-            useStudio.setState({
-              selection: [intent.clipId],
-              inspectorCollapsed: false,
-            });
-            if (intent.kind === 'text') onOpenText?.(intent.clipId);
-          }}
-        />
-        {editing && activeTextId ? (
+        {!historical ? (
+          <CompositorOverlay
+            project={project}
+            assets={assets}
+            scene={scene}
+            overlay={overlay}
+            maskEdge={maskEdge}
+            displayScale={scale}
+            onTransformStart={transformStart}
+            onEditIntent={(intent) => {
+              if (projection.current.historical) return;
+              useStudio.setState({
+                selection: [intent.clipId],
+                inspectorCollapsed: false,
+              });
+              if (intent.kind === 'text') onOpenText?.(intent.clipId);
+            }}
+          />
+        ) : null}
+        {!historical && editing && activeTextId ? (
           <ViewerTextLayer
             clipId={activeTextId}
             project={project}
@@ -405,7 +488,7 @@ export function StudioCompositor({
           preview approx.
         </span>
       ) : null}
-      {ready && editAt ? (
+      {!historical && ready && editAt ? (
         <button
           className={styles.editAt}
           onClick={() => {

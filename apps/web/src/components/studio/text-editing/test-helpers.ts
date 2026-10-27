@@ -1,8 +1,9 @@
 import type { EditContext } from '@/lib/editing/types';
 import { vi } from 'vitest';
 import { createEditingSession } from '@/lib/editing/session';
+import { testPersistence } from '@/lib/editing/persistence-test-helpers';
 import { fixture } from '@/lib/editing/test-fixtures';
-export function setupText() {
+export async function setupText() {
   const project = fixture();
   let version = 0;
   const ops = vi.fn<EditContext['client']['ops']>(async () => ({
@@ -12,6 +13,7 @@ export function setupText() {
   const selectionRemoved = vi.fn();
   let n = 0;
   const editing = createEditingSession({
+    persistence: testPersistence().persistence,
     sessionId: 'text-test',
     project,
     client: {
@@ -22,5 +24,6 @@ export function setupText() {
     notifications: { toast },
     selectionRemoved,
   });
+  await editing.ready();
   return { project, editing, ops, toast, selectionRemoved };
 }

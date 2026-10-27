@@ -597,3 +597,128 @@
 .landing-page[data-sending] .horizon-glow {
   animation: none;
 }
+
+.landing-privacy {
+  margin-top: var(--space-12);
+  font-size: var(--t-11);
+  line-height: var(--leading-11);
+  color: var(--cream-38);
+  text-align: center;
+  text-transform: none;
+  text-wrap: pretty;
+}
+.landing-privacy a {
+  text-decoration: underline;
+  text-underline-offset: var(--space-2);
+}
+.landing-privacy a:hover {
+  color: var(--cream-100);
+}
+
+/* The lightweight composer uses the same entrance delay and soft spring as
+   Motion's stiffness:260, damping:32, mass:1. Samples are generated from that
+   damped oscillator, not a new easing. The rest of the landing already enters
+   through the shared CSS above. */
+.landing-page[data-bootstrap] {
+  --composer-soft: linear(
+    0,
+    0.042126,
+    0.137287,
+    0.253165,
+    0.371143,
+    0.481243,
+    0.578804,
+    0.662324,
+    0.73208,
+    0.789265,
+    0.835467,
+    0.872359,
+    0.901533,
+    0.924415,
+    0.942236,
+    0.956033,
+    0.966656,
+    0.974797,
+    0.981009,
+    0.98573,
+    0.989307,
+    0.992007,
+    0.99404,
+    0.995565,
+    0.996707,
+    0.99756,
+    0.998196,
+    0.998669,
+    0.999019,
+    0.999279,
+    0.99947,
+    0.999612,
+    0.999716,
+    0.999793,
+    0.999849,
+    0.99989,
+    0.99992,
+    0.999942,
+    0.999958,
+    0.99997,
+    0.999978,
+    0.999984,
+    0.999989,
+    0.999992,
+    0.999994,
+    0.999996
+  );
+}
+.landing-page[data-bootstrap] .landing-composer {
+  animation: composer-enter var(--entrance) var(--composer-soft)
+    var(--entry-composer) both;
+}
+@keyframes composer-enter {
+  from {
+    opacity: 0;
+    scale: 0.98;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+/* Remounting the interactive tree must not replay any page entrance. Preserve
+   the live typing glow and all subsequent send/attachment transitions. */
+.landing-page[data-activated] .landing-nav,
+.landing-page[data-activated] .hero-copy > .ui-pill,
+.landing-page[data-activated] .hero-copy h1 > span,
+.landing-page[data-activated] .hero-copy em,
+.landing-page[data-activated] .hero-subtext,
+.landing-page[data-activated] .example-prompts button {
+  animation: none !important;
+}
+.landing-page[data-activated]:not([data-typing]) .horizon-glow {
+  animation: none;
+}
+.landing-bootstrap-status {
+  position: fixed;
+  bottom: var(--space-16);
+  left: var(--space-16);
+  right: var(--space-16);
+  z-index: 30;
+  color: var(--cream-100);
+  font-size: var(--t-13);
+}
+.landing-bootstrap-status > span {
+  display: block;
+  width: fit-content;
+  padding: var(--space-8) var(--space-12);
+  background: var(--ink-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-8);
+}
+.landing-bootstrap-status button {
+  text-decoration: underline;
+}
+@media (prefers-reduced-motion: reduce) {
+  .landing-page[data-bootstrap] .landing-composer {
+    animation: landing-fade var(--dur-3) both;
+    scale: none;
+  }
+}

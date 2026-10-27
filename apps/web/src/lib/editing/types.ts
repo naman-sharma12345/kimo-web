@@ -1,3 +1,4 @@
+import type { EditOutboxPersistence } from './persistence';
 import type { Asset, KimoProject, Op, SessionSnapshot } from '@kimo/client';
 
 export type EditSource =
@@ -48,7 +49,17 @@ export interface TextSuggestion {
   version: number;
   actionId?: string;
 }
+export type EditPersistenceStatus =
+  'hydrating' | 'ready' | 'locked' | 'unavailable' | 'unreadable' | 'disposed';
+export interface EditReadiness {
+  status: Exclude<EditPersistenceStatus, 'hydrating'>;
+  error?: string;
+}
 export interface EditState {
+  persistenceStatus: EditPersistenceStatus;
+  persistencePending: boolean;
+  editingEnabled: boolean;
+  dispatchEnabled: boolean;
   project: KimoProject;
   acknowledged: KimoProject;
   acknowledgedVersion: number;
@@ -98,6 +109,10 @@ export interface EditContext {
     send(text: string, attachments?: readonly string[]): Promise<void>;
     prefill(text: string): void;
   };
+  persistence?: EditOutboxPersistence;
+  /** Await a disposed in-process predecessor, never a foreign-tab takeover. */
+  persistenceReadyAfter?: Promise<void>;
+  /** Legacy migration input only. Never authorizes volatile dispatch. */
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
   online?: () => boolean;
   makeId?: () => string;
@@ -110,6 +125,8 @@ export interface BeginEdit {
   source: EditSource;
 }
 export interface EditingAPI {
+  ready(): Promise<EditReadiness>;
+  closed(): Promise<void>;
   getState(): EditState;
   subscribe(listener: (state: EditState) => void): () => void;
   beginEdit(input: BeginEdit): string;

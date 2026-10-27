@@ -18,7 +18,9 @@ import {
 } from './compositor-bridge';
 import { StudioShell } from './studio-shell';
 const mocks = vi.hoisted(() => ({
+  router: { push: vi.fn() },
   created: vi.fn(),
+  previewProject: null as KimoProject | null,
   init: vi.fn(async (): Promise<void> => undefined),
   dispose: vi.fn(),
   event: vi.fn(),
@@ -49,7 +51,14 @@ const mocks = vi.hoisted(() => ({
   })),
   socketReceive: undefined as ((event: ServerEvent) => void) | undefined,
 }));
-vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock('next/navigation', () => ({ useRouter: () => mocks.router }));
+vi.mock('@/lib/editing/indexeddb', async () => {
+  const { testPersistence } =
+    await import('@/lib/editing/persistence-test-helpers');
+  return {
+    createIndexedDBEditPersistence: () => testPersistence().persistence,
+  };
+});
 vi.mock('@/lib/api', () => ({
   api: {
     connect: (...args: unknown[]) => mocks.connect(...args),
@@ -65,16 +74,24 @@ vi.mock('@kimo/compositor', () => ({
   measureTextOverlay: vi.fn(async () => undefined),
   CompositorController: class {
     constructor(options: {
+      project: KimoProject;
+      assets: readonly import('@kimo/client').Asset[];
       onPlayback?: (time: number, playing: boolean, fps: number | null) => void;
     }) {
-      mocks.created();
+      mocks.created(options.project, options.assets);
+      mocks.previewProject = options.project;
       mocks.playback = options.onPlayback;
     }
     init = mocks.init;
     dispose = mocks.dispose;
-    event = mocks.event;
+    event = (event: ServerEvent) => {
+      if (event.t !== 'hello') mocks.event(event);
+    };
     setAssets = mocks.assets;
-    updateProject = mocks.updateProject;
+    updateProject = (next: KimoProject) => {
+      mocks.previewProject = next;
+      mocks.updateProject(next);
+    };
     setTransport = mocks.transport;
     resize = mocks.resize;
     getResource = () => undefined;
@@ -121,6 +138,7 @@ beforeEach(() => {
     () => null,
   );
   vi.clearAllMocks();
+  mocks.session.mockResolvedValue(snapshot);
   useStudio.getState().resetSession('s', 10, true, false);
   useProject.getState().replace(project);
   Object.defineProperty(window, 'devicePixelRatio', {
@@ -137,6 +155,7 @@ beforeEach(() => {
   );
   mocks.connect.mockImplementation((_url, receive) => {
     mocks.socketReceive = receive;
+    queueMicrotask(() => receive({ t: 'hello', version: 1 }));
     return {
       readyState: WebSocket.OPEN,
       close: mocks.close,
@@ -247,7 +266,7 @@ describe('Authoritative snapshot bridge', () => {
       source: 'user' as const,
       url: '/new',
     };
-    mocks.session.mockResolvedValue({
+    mocks.session.mockResolvedValueOnce(snapshot).mockResolvedValue({
       ...snapshot,
       project: { ...project, version: 5 },
       assets: [asset],
@@ -262,7 +281,7 @@ describe('Authoritative snapshot bridge', () => {
     expect(receive).toHaveBeenCalledTimes(1);
     act(() => mocks.socketReceive?.({ t: 'project.ops', version: 5, ops: [] }));
     await waitFor(() => expect(useProject.getState().project?.version).toBe(5));
-    expect(mocks.session).toHaveBeenCalledTimes(1);
+    expect(mocks.session).toHaveBeenCalledTimes(2);
     expect(receive).toHaveBeenCalledTimes(1);
     expect(mocks.assets).toHaveBeenLastCalledWith(withBuiltinAssets([asset]));
     act(() => mocks.socketReceive?.({ t: 'project.ops', version: 5, ops: [] }));
@@ -302,7 +321,7 @@ describe('Custom viewer slot bridge', () => {
         slots={{ viewer: <div>custom live viewer</div> }}
       />,
     );
-    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mocks.connect).toHaveBeenCalledTimes(1));
     expect(mocks.created).not.toHaveBeenCalled();
     expect(screen.getByText('custom live viewer')).toBeInTheDocument();
     const action: ServerEvent = {
@@ -314,7 +333,9 @@ describe('Custom viewer slot bridge', () => {
       target: { clipId: 'text' },
     };
     act(() => mocks.socketReceive?.(action));
-    expect(event).toHaveBeenCalledTimes(1);
+    expect(
+      event.mock.calls.filter(([packet]) => packet.t === 'agent.action.start'),
+    ).toHaveLength(1);
     expect(event).toHaveBeenLastCalledWith(action);
     const image = {
       id: 'slot-image',
@@ -487,5 +508,209 @@ describe('shared poster handle (mocked controller, not GPU acceptance)', () => {
     expect(mocks.created).toHaveBeenCalledTimes(1);
     view.unmount();
     expect(ref.current).toBeNull();
+  });
+});
+
+describe('historical cut projection (mocked controller, no GPU acceptance)', () => {
+  const cut: KimoProject = {
+    ...project,
+    version: 0,
+    width: 1080,
+    height: 1920,
+  };
+  const cutAssets = [
+    {
+      id: 'cut-image',
+      kind: 'image' as const,
+      name: 'cut',
+      source: 'user' as const,
+      url: '/cut.png',
+    },
+  ];
+  const liveAssets = cutAssets.map((asset) => ({
+    ...asset,
+    id: 'live-image',
+    url: '/live.png',
+  }));
+  const action: ServerEvent = {
+    t: 'agent.action.start',
+    id: 'historical-action',
+    tool: 'trim',
+    title: 'trim',
+    args: {},
+    target: { clipId: 'text', time: 3 },
+  };
+  it('switches cuts on the sole controller, fences live ingress, then restores CURRENT live projection and registry', async () => {
+    const ref = React.createRef<StudioCompositorHandle>();
+    const view = render(
+      <StudioCompositor project={project} assets={[]} bridgeRef={ref} />,
+    );
+    await waitFor(() => expect(mocks.init).toHaveBeenCalledTimes(1));
+    const canvas = screen.getByTestId('compositor-canvas');
+    view.rerender(
+      <StudioCompositor
+        project={cut}
+        assets={cutAssets}
+        historical
+        bridgeRef={ref}
+      />,
+    );
+    expect(mocks.updateProject).toHaveBeenLastCalledWith(cut);
+    expect(mocks.assets).toHaveBeenLastCalledWith(cutAssets);
+    const count = mocks.updateProject.mock.calls.length;
+    const assetsCount = mocks.assets.mock.calls.length;
+    const currentLive = { ...project, version: 7 };
+    act(() => {
+      useProject.getState().replace(currentLive);
+      ref.current?.assets(liveAssets);
+      ref.current?.event(action);
+      ref.current?.event({
+        t: 'sam.mask',
+        actionId: action.id,
+        clipId: 'text',
+        maskAssetId: 'live-mask',
+        previewPolygon: [],
+      });
+      useStudio.getState().seek(2);
+    });
+    expect(mocks.updateProject).toHaveBeenCalledTimes(count);
+    expect(mocks.assets).toHaveBeenCalledTimes(assetsCount);
+    expect(mocks.event).not.toHaveBeenCalled();
+    expect(mocks.transport).toHaveBeenLastCalledWith(
+      expect.objectContaining({ followKimo: false }),
+      2,
+    );
+    const secondCut = { ...cut, version: 2 };
+    view.rerender(
+      <StudioCompositor
+        project={secondCut}
+        assets={cutAssets}
+        historical
+        bridgeRef={ref}
+      />,
+    );
+    expect(mocks.updateProject).toHaveBeenLastCalledWith(secondCut);
+    expect(useProject.getState().project).toBe(currentLive);
+    // Model the real controller's existing project-version reporting, not a bridge relabel.
+    mocks.getFrame.mockImplementationOnce(async () => ({
+      blob: new Blob(['mock']),
+      time: 1,
+      projectVersion: mocks.previewProject?.version ?? -1,
+      width: 640,
+      height: 360,
+      approximations: [],
+    }));
+    expect(await ref.current?.getFrame?.(1)).toMatchObject({
+      projectVersion: 2,
+    });
+    // Even a stale project prop cannot restore an old live projection on exit.
+    view.rerender(
+      <StudioCompositor
+        project={project}
+        assets={liveAssets}
+        bridgeRef={ref}
+      />,
+    );
+    expect(mocks.updateProject).toHaveBeenLastCalledWith(currentLive);
+    expect(mocks.assets).toHaveBeenLastCalledWith(liveAssets);
+    act(() => ref.current?.event(action));
+    expect(mocks.event).toHaveBeenLastCalledWith(action);
+    expect(mocks.created).toHaveBeenCalledTimes(1);
+    expect(mocks.init).toHaveBeenCalledTimes(1);
+    expect(mocks.dispose).not.toHaveBeenCalled();
+    expect(screen.getByTestId('compositor-canvas')).toBe(canvas);
+    view.unmount();
+    expect(mocks.dispose).toHaveBeenCalledTimes(1);
+  });
+  it('retains incoming live registry for exit without replaying historical action packets', async () => {
+    const ref = React.createRef<StudioCompositorHandle>();
+    const view = render(
+      <StudioCompositor
+        project={cut}
+        assets={cutAssets}
+        historical
+        bridgeRef={ref}
+      />,
+    );
+    await waitFor(() => expect(mocks.init).toHaveBeenCalledTimes(1));
+    expect(mocks.previewProject).toBe(cut);
+    expect(screen.getByLabelText('historical cut preview')).toBeInTheDocument();
+    expect(screen.queryByTestId('compositor-guides')).not.toBeInTheDocument();
+    act(() => {
+      ref.current?.assets(liveAssets);
+      ref.current?.event(action);
+    });
+    // An unchanged array identity must not erase the latest ingress registry.
+    view.rerender(
+      <StudioCompositor project={project} assets={cutAssets} bridgeRef={ref} />,
+    );
+    expect(mocks.assets).toHaveBeenLastCalledWith(liveAssets);
+    expect(mocks.updateProject).toHaveBeenLastCalledWith(
+      useProject.getState().project,
+    );
+    expect(mocks.event).not.toHaveBeenCalled();
+    expect(mocks.created).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
+  it('initializes from latest historical props and never overwrites them with live store or queued actions', async () => {
+    const ref = React.createRef<StudioCompositorHandle>();
+    const view = render(
+      <StudioCompositor project={project} assets={[]} bridgeRef={ref} />,
+    );
+    act(() => ref.current?.event(action));
+    view.rerender(
+      <StudioCompositor
+        project={cut}
+        assets={cutAssets}
+        historical
+        bridgeRef={ref}
+      />,
+    );
+    act(() => ref.current?.assets(liveAssets));
+    await waitFor(() => expect(mocks.init).toHaveBeenCalledTimes(1));
+    expect(mocks.created).toHaveBeenLastCalledWith(cut, cutAssets);
+    expect(mocks.previewProject).toBe(cut);
+    expect(mocks.event).not.toHaveBeenCalled();
+    expect(
+      mocks.transport.mock.calls.some(
+        ([intent]) => intent.followKimo === false,
+      ),
+    ).toBe(true);
+    view.unmount();
+  });
+  it('updates the existing initializing controller on prop transitions and fences retained ingress after disposal', async () => {
+    let resolve!: () => void;
+    mocks.init.mockImplementationOnce(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done;
+        }),
+    );
+    const ref = React.createRef<StudioCompositorHandle>();
+    const view = render(
+      <StudioCompositor project={project} assets={[]} bridgeRef={ref} />,
+    );
+    await waitFor(() => expect(mocks.init).toHaveBeenCalledTimes(1));
+    view.rerender(
+      <StudioCompositor
+        project={cut}
+        assets={cutAssets}
+        historical
+        bridgeRef={ref}
+      />,
+    );
+    expect(mocks.updateProject).toHaveBeenLastCalledWith(cut);
+    const retained = ref.current;
+    view.unmount();
+    const count = mocks.assets.mock.calls.length;
+    act(() => {
+      retained?.assets(liveAssets);
+      retained?.event(action);
+    });
+    await act(async () => resolve());
+    expect(mocks.assets).toHaveBeenCalledTimes(count);
+    expect(mocks.event).not.toHaveBeenCalled();
+    expect(ref.current).toBeNull();
+    expect(useStudio.getState().previewStatus).toBe('legacy');
   });
 });

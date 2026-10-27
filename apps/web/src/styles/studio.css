@@ -851,3 +851,22 @@
   color: var(--cream-38);
   font-size: var(--t-11);
 }
+
+.studio-storage-notice {
+  flex: none;
+  padding: var(--space-8) var(--space-16);
+  background: var(--ink-2);
+  color: var(--cream-60);
+  font-size: var(--t-12);
+  border-block: 1px solid var(--line);
+}
+
+.studio-compare-control {
+  position: absolute;
+  top: var(--space-8);
+  left: var(--space-8);
+  z-index: 2;
+  max-width: min(100%, var(--phase9-glow-height));
+  color: var(--cream-60);
+  font-size: var(--t-11);
+}

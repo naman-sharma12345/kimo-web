@@ -12,7 +12,9 @@ const mocks = vi.hoisted(() => ({
     throw new Error('not-found');
   }),
 }));
-vi.mock('@/lib/api', () => ({ api: { session: mocks.session } }));
+vi.mock('@/lib/server-api', () => ({
+  createServerApi: async () => ({ session: mocks.session }),
+}));
 vi.mock('next/navigation', () => ({
   redirect: mocks.redirect,
   notFound: mocks.notFound,

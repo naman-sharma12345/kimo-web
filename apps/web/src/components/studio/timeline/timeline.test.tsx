@@ -24,6 +24,8 @@ function setup(overrides: Partial<TimelineEditorProps> = {}) {
   const p = overrides.project ?? project();
   const result = { id: 'edit', status: 'acknowledged' as const };
   const editing: EditingAPI = {
+    ready: vi.fn(async () => ({ status: 'ready' as const })),
+    closed: vi.fn(async () => undefined),
     getState: vi.fn(),
     subscribe: vi.fn(() => () => undefined),
     beginEdit: vi.fn(() => 'gesture'),
@@ -49,6 +51,10 @@ function setup(overrides: Partial<TimelineEditorProps> = {}) {
     draft: null,
     saveStatus: 'saved',
     storageAvailable: true,
+    persistenceStatus: 'ready',
+    persistencePending: false,
+    editingEnabled: true,
+    dispatchEnabled: true,
     canUndo: false,
     canRedo: false,
     history: [],
@@ -531,4 +537,48 @@ describe('timeline editor source-level lifecycle with mocked canvas', () => {
       'timeline',
     );
   });
+});
+
+describe('actual optional beats in pointer gestures', () => {
+  it.each([true, false])(
+    'uses supplied music beat for pointer move only when supplied: %s',
+    async (supplied) => {
+      const music = clip('music', {
+        trackId: 'aud',
+        kind: 'audio',
+        audioRole: 'music',
+        start: 0,
+        duration: 20,
+      });
+      const p = project([clip(), music], [track(), track('aud', 'audio')]);
+      const { editing, container } = setup({
+        project: p,
+        playhead: 0,
+        beats: supplied
+          ? [{ clipId: 'music', trackId: 'aud', time: 5.5 }]
+          : undefined,
+      });
+      const surface = container.querySelector('[data-track-surface="v"]');
+      if (!surface) throw new Error('missing track');
+      const root = screen.getByRole('grid');
+      fireEvent.pointerDown(surface, {
+        button: 0,
+        pointerId: 21,
+        clientX: 660,
+        clientY: 40,
+      });
+      fireEvent.pointerMove(root, { pointerId: 21, clientX: 805, clientY: 40 });
+      await act(async () =>
+        fireEvent.pointerUp(root, { pointerId: 21, clientX: 805, clientY: 40 }),
+      );
+      expect(editing.commitEdit).toHaveBeenCalledWith('gesture', [
+        {
+          op: 'clip.move',
+          id: 'a',
+          trackId: 'v',
+          start: supplied ? 5.5 : 4 + Math.round(1.45 * 30) / 30,
+        },
+      ]);
+    },
+  );
 });

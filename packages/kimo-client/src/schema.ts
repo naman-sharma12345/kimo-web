@@ -406,25 +406,6 @@ export const sessionResponseSchema = z.object({
   sessionId: id,
   wsUrl: z.string(),
 });
-export const sessionSnapshotSchema = z.object({
-  status: z.enum([
-    'warming',
-    'editing',
-    'awaiting_review',
-    'rendering',
-    'done',
-    'failed',
-  ]),
-  project: projectSchema,
-  // Unique server-recorded agent.action.start IDs, never inferred from version.
-  actionIds: z.array(id).optional(),
-  assets: z.array(assetSchema),
-  wsUrl: z.string().optional(),
-  videoId: id.optional(),
-  renderId: id.optional(),
-  title: z.string().optional(),
-  editExpiresAt: z.string().datetime().optional(),
-});
 export const messageRequestSchema = z.object({
   text: z.string(),
   attachments: z.array(id).optional(),
@@ -586,6 +567,34 @@ export const serverEventSchema = z.discriminatedUnion('t', [
   }),
   z.object({ t: z.literal('error'), code: z.string(), message: z.string() }),
 ]);
+/** Optional presentation history only; deliberately excludes edits and resources. */
+export const agentHistoryEventSchema = z.discriminatedUnion('t', [
+  serverEventSchema.options[1],
+  serverEventSchema.options[2],
+  serverEventSchema.options[4],
+  serverEventSchema.options[6],
+  serverEventSchema.options[10],
+]);
+export const sessionSnapshotSchema = z.object({
+  status: z.enum([
+    'warming',
+    'editing',
+    'awaiting_review',
+    'rendering',
+    'done',
+    'failed',
+  ]),
+  project: projectSchema,
+  // Unique server-recorded agent.action.start IDs, never inferred from version.
+  actionIds: z.array(id).optional(),
+  agentHistory: z.array(agentHistoryEventSchema).optional(),
+  assets: z.array(assetSchema),
+  wsUrl: z.string().optional(),
+  videoId: id.optional(),
+  renderId: id.optional(),
+  title: z.string().optional(),
+  editExpiresAt: z.string().datetime().optional(),
+});
 export const clientEventSchema = z.discriminatedUnion('t', [
   z.object({
     t: z.literal('interrupt'),

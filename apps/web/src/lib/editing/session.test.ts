@@ -1,9 +1,10 @@
+import { testPersistence } from './persistence-test-helpers';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, applyOps, type KimoProject, type Op } from '@kimo/client';
 import { createEditingSession } from './session';
 import { assets, deferred, fixture, memoryStorage } from './test-fixtures';
 import type { EditContext } from './types';
-function setup(overrides: Partial<EditContext> = {}) {
+async function setup(overrides: Partial<EditContext> = {}) {
   let server: KimoProject = fixture();
   const client = {
     ops: vi.fn(async (_id: string, ops: Op[], version: number) => {
@@ -25,10 +26,13 @@ function setup(overrides: Partial<EditContext> = {}) {
     client,
     ...overrides,
   };
+  context.persistence = persistenceFor(context.storage);
+  const session = createEditingSession(context);
+  await session.ready();
   return {
     client,
     context,
-    session: createEditingSession(context),
+    session,
     setServer(project: KimoProject) {
       server = project;
     },
@@ -42,7 +46,7 @@ const rename = (content: string): Op[] => [
 ];
 describe('editing transactions and authority', () => {
   it('replaces previews against begin baseline, never posts or advances version, commits exactly once', async () => {
-    const { session, client } = setup();
+    const { session, client } = await setup();
     const id = session.beginEdit({
       clipIds: ['c'],
       label: 'move',
@@ -67,7 +71,7 @@ describe('editing transactions and authority', () => {
     });
   });
   it('cancels a draft without HTTP and reveals queued authoritative fields immediately on release', async () => {
-    const { session } = setup();
+    const { session } = await setup();
     const id = session.beginEdit({
       clipIds: ['c'],
       label: 'move',
@@ -91,14 +95,14 @@ describe('editing transactions and authority', () => {
     expect(session.getState().project.clips.c?.volume).toBe(0.5);
   });
   it('serializes overlapping user groups using latest acknowledged bases, not optimistic increments', async () => {
-    const { session, client } = setup();
+    const { session, client } = await setup();
     const firstAck = deferred<{ version: number }>();
     client.ops
       .mockImplementationOnce(() => firstAck.promise)
       .mockResolvedValueOnce({ version: 2 });
     const first = session.editGroup(move(1), 'move');
     const second = session.editGroup(rename('mine'), 'title text');
-    await Promise.resolve();
+    await settleDispatch();
     expect(client.ops).toHaveBeenCalledTimes(1);
     expect(session.getState().acknowledgedVersion).toBe(0);
     firstAck.resolve({ version: 1 });
@@ -108,7 +112,7 @@ describe('editing transactions and authority', () => {
     expect(session.getState().acknowledgedVersion).toBe(2);
   });
   it('handles own WebSocket echo before HTTP ACK without duplicating non-idempotent track adds', async () => {
-    const { session, client } = setup();
+    const { session, client } = await setup();
     const ack = deferred<{ version: number }>();
     client.ops.mockImplementationOnce(() => ack.promise);
     const ops: Op[] = [
@@ -126,7 +130,7 @@ describe('editing transactions and authority', () => {
       },
     ];
     const result = session.editGroup(ops, 'audio');
-    await Promise.resolve();
+    await settleDispatch();
     await session.receiveAuthoritative({ version: 1, ops });
     expect(
       session.getState().project.tracks.filter((t) => t.id === 'new'),
@@ -139,7 +143,7 @@ describe('editing transactions and authority', () => {
     ).toHaveLength(1);
   });
   it('deduplicates HTTP-before-echo and keeps later agent operations', async () => {
-    const { session } = setup();
+    const { session } = await setup();
     await session.editGroup(move(1), 'move');
     await session.receiveAuthoritative({ version: 1, ops: move(1) });
     await session.receiveAuthoritative({
@@ -153,7 +157,7 @@ describe('editing transactions and authority', () => {
     expect(session.getState().project.clips.c?.start).toBe(1);
   });
   it('advances authority during a text lock and exposes the exact suggestion without changing the active draft', async () => {
-    const { session } = setup();
+    const { session } = await setup();
     const id = session.beginEdit({
       clipIds: ['t'],
       label: 'title text',
@@ -181,7 +185,7 @@ describe('editing transactions and authority', () => {
   it('immediately cancels removed draft, cleans selection and supplies a deliberate exact-toast undo action', async () => {
     const toast = vi.fn();
     const selectionRemoved = vi.fn();
-    const { session, setServer } = setup({
+    const { session, setServer } = await setup({
       notifications: { toast },
       selectionRemoved,
     });
@@ -214,7 +218,7 @@ describe('editing transactions and authority', () => {
   });
   it('rebases and retries only once on evidenced 409, restoring snapshot assets as well', async () => {
     const assetsChanged = vi.fn();
-    const { session, client, setServer } = setup({ assetsChanged });
+    const { session, client, setServer } = await setup({ assetsChanged });
     setServer(applyOps(fixture(), rename('agent')));
     client.ops.mockRejectedValueOnce(new ApiError(409, 'stale'));
     expect((await session.editGroup(move(2), 'move')).status).toBe(
@@ -226,7 +230,7 @@ describe('editing transactions and authority', () => {
     expect(session.getState().project.clips.t?.text?.content).toBe('agent');
   });
   it('revalidates after 409 and does not retry a removed/locked target', async () => {
-    const { session, client, setServer } = setup();
+    const { session, client, setServer } = await setup();
     setServer(applyOps(fixture(), [{ op: 'clip.remove', id: 'c' }]));
     client.ops.mockRejectedValueOnce(new ApiError(409, 'stale'));
     expect((await session.editGroup(move(2), 'move')).status).toBe('failed');
@@ -234,12 +238,12 @@ describe('editing transactions and authority', () => {
     expect(session.getState().saveStatus).toBe('unsaved');
   });
   it('never retries a second 409 or loses the pending edit on failed snapshot', async () => {
-    const a = setup();
+    const a = await setup();
     a.client.ops.mockRejectedValue(new ApiError(409, 'stale'));
     expect((await a.session.editGroup(move(1), 'move')).status).toBe('failed');
     expect(a.client.ops).toHaveBeenCalledTimes(2);
     expect(a.session.getState().pending).toHaveLength(1);
-    const b = setup();
+    const b = await setup();
     b.client.ops.mockRejectedValue(new ApiError(409, 'stale'));
     b.client.session.mockRejectedValue(new Error('offline snapshot'));
     expect((await b.session.editGroup(move(1), 'move')).status).toBe('failed');
@@ -248,7 +252,7 @@ describe('editing transactions and authority', () => {
   });
   it('treats timeout acceptance as unknown and never replays add/split on flush or reload', async () => {
     const storage = memoryStorage();
-    const a = setup({ storage });
+    const a = await setup({ storage });
     a.client.ops.mockRejectedValue(new TypeError('timeout'));
     const result = await a.session.editGroup(
       [{ op: 'clip.split', id: 'c', at: 2, newId: 'right' }],
@@ -259,23 +263,26 @@ describe('editing transactions and authority', () => {
     expect(a.session.getState().project.clips.right).toBeDefined();
     await a.session.flush();
     expect(a.client.ops).toHaveBeenCalledTimes(1);
-    const b = setup({ storage });
+    a.session.dispose();
+    await a.session.closed();
+    const b = await setup({ storage });
     await b.session.flush();
     expect(b.client.ops).not.toHaveBeenCalled();
     expect(b.session.getState().saveStatus).toBe('unknown');
   });
   it('restores an unsent session-versioned offline outbox, but not into another project or session', async () => {
     const storage = memoryStorage();
-    const a = setup({ storage, online: () => false });
+    const a = await setup({ storage, online: () => false });
     expect((await a.session.editGroup(move(2), 'move')).status).toBe('queued');
     a.session.dispose();
+    await a.session.closed();
     expect(a.client.ops).not.toHaveBeenCalled();
-    const b = setup({ storage });
+    const b = await setup({ storage });
     expect(b.session.getState().pending).toHaveLength(1);
     await b.session.flush();
     expect(b.client.ops).toHaveBeenCalledTimes(1);
     expect(b.session.getState().saveStatus).toBe('saved');
-    const other = setup({ sessionId: 'other', storage });
+    const other = await setup({ sessionId: 'other', storage });
     expect(other.session.getState().pending).toHaveLength(0);
   });
   it('reports denied storage as unsaved and never calls it locally saved', async () => {
@@ -290,7 +297,7 @@ describe('editing transactions and authority', () => {
         throw new Error('denied');
       },
     };
-    const { session } = setup({ storage: denied, online: () => false });
+    const { session } = await setup({ storage: denied, online: () => false });
     await session.editGroup(move(1), 'move');
     expect(session.getState()).toMatchObject({
       storageAvailable: false,
@@ -298,7 +305,7 @@ describe('editing transactions and authority', () => {
     });
   });
   it('buffers a version gap and does not roll back a newer authority when the snapshot is behind', async () => {
-    const { session, client } = setup();
+    const { session, client } = await setup();
     await session.receiveAuthoritative({
       version: 1,
       actionId: 'a1',
@@ -325,11 +332,11 @@ describe('editing transactions and authority', () => {
   });
   it('invalidates stale HTTP work and aborts its request when a session is disposed', async () => {
     const projectChanged = vi.fn();
-    const { session, client } = setup({ projectChanged });
+    const { session, client } = await setup({ projectChanged });
     const ack = deferred<{ version: number }>();
     client.ops.mockImplementationOnce(() => ack.promise);
     const result = session.editGroup(move(2), 'move');
-    await Promise.resolve();
+    await settleDispatch();
     session.dispose();
     const calls = projectChanged.mock.calls.length;
     ack.resolve({ version: 1 });
@@ -343,7 +350,7 @@ describe('editing transactions and authority', () => {
 });
 describe('per-author conditional undo and real action IDs', () => {
   it('undoes a user field while preserving unrelated later AI fields, then supports redo', async () => {
-    const { session, setServer } = setup();
+    const { session, setServer } = await setup();
     await session.editGroup(move(1), 'move');
     const ai: Op[] = [{ op: 'clip.update', id: 'c', patch: { volume: 0.4 } }];
     setServer(applyOps(session.getState().acknowledged, ai));
@@ -364,7 +371,7 @@ describe('per-author conditional undo and real action IDs', () => {
     });
   });
   it('refuses same-field collisions rather than erasing the agent, with no HTTP dispatch', async () => {
-    const { session, client } = setup();
+    const { session, client } = await setup();
     await session.editGroup(move(1), 'move');
     await session.receiveAuthoritative({
       version: 2,
@@ -376,7 +383,7 @@ describe('per-author conditional undo and real action IDs', () => {
     expect(session.getState().project.clips.c?.start).toBe(2);
   });
   it('keeps redo after an agent update, but clears it for a new user group', async () => {
-    const { session, setServer } = setup();
+    const { session, setServer } = await setup();
     await session.editGroup(move(1), 'move');
     await session.undoUser();
     expect(session.getState().canRedo).toBe(true);
@@ -392,7 +399,7 @@ describe('per-author conditional undo and real action IDs', () => {
     expect(session.getState().canRedo).toBe(false);
   });
   it('reverts a real agent group only with locally observed preimages, preserving later unrelated user edits', async () => {
-    const { session, setServer } = setup();
+    const { session, setServer } = await setup();
     const ai = rename('agent title');
     setServer(applyOps(fixture(), ai));
     await session.receiveAuthoritative({
@@ -413,7 +420,7 @@ describe('per-author conditional undo and real action IDs', () => {
     ).toBe('failed');
   });
   it('preserves unrelated nested transform leaves when undoing a numeric edit', async () => {
-    const { session, setServer } = setup();
+    const { session, setServer } = await setup();
     const c = fixture().clips.c;
     await session.editGroup(
       [
@@ -445,3 +452,20 @@ describe('per-author conditional undo and real action IDs', () => {
     });
   });
 });
+
+const persistenceByStorage = new WeakMap<
+  object,
+  ReturnType<typeof testPersistence>
+>();
+function persistenceFor(storage?: EditContext['storage']) {
+  if (!storage) return testPersistence().persistence;
+  let adapter = persistenceByStorage.get(storage);
+  if (!adapter) {
+    adapter = testPersistence();
+    persistenceByStorage.set(storage, adapter);
+  }
+  return adapter.persistence;
+}
+async function settleDispatch() {
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+}

@@ -1,3 +1,4 @@
+import { testPersistence } from './persistence-test-helpers';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, applyOps, type KimoProject, type Op } from '@kimo/client';
 import { createEditingSession } from './session';
@@ -5,7 +6,7 @@ import { detachAudio, trimClip } from './commands';
 import { captureHistory, historyOps } from './history';
 import { assets, deferred, fixture, memoryStorage } from './test-fixtures';
 import type { EditContext } from './types';
-function harness(options: Partial<EditContext> = {}) {
+async function harness(options: Partial<EditContext> = {}) {
   let server: KimoProject = fixture();
   const client = {
     ops: vi.fn<EditContext['client']['ops']>(async (_id, ops, version) => {
@@ -26,7 +27,9 @@ function harness(options: Partial<EditContext> = {}) {
     storage: memoryStorage(),
     client,
     ...options,
+    persistence: persistenceFor(options.storage),
   });
+  await session.ready();
   return {
     session,
     client,
@@ -38,11 +41,11 @@ function harness(options: Partial<EditContext> = {}) {
 const move: Op[] = [{ op: 'clip.move', id: 'c', trackId: 'v', start: 2 }];
 describe('recovery and concurrent authority regressions', () => {
   it('preserves an unrelated agent field arriving while the user POST is in flight', async () => {
-    const { session, client } = harness();
+    const { session, client } = await harness();
     const ack = deferred<{ version: number }>();
     client.ops.mockImplementationOnce(() => ack.promise);
     const result = session.editGroup(move, 'move');
-    await Promise.resolve();
+    await settleDispatch();
     await session.receiveAuthoritative({
       version: 1,
       actionId: 'agent',
@@ -61,7 +64,7 @@ describe('recovery and concurrent authority regressions', () => {
     expect(session.getState().acknowledgedVersion).toBe(2);
   });
   it('commits over advanced authority after a soft lock, without dropping the agent field', async () => {
-    const { session, setServer } = harness();
+    const { session, setServer } = await harness();
     const id = session.beginEdit({
       clipIds: ['c'],
       label: 'move',
@@ -78,7 +81,7 @@ describe('recovery and concurrent authority regressions', () => {
     });
   });
   it('resolves an unknown request only when an explicit own mutation ID proves acceptance, never matching op contents', async () => {
-    const { session, client } = harness({ mutationIdentity: true });
+    const { session, client } = await harness({ mutationIdentity: true });
     client.ops.mockRejectedValueOnce(new TypeError('response lost'));
     const result = await session.editGroup(move, 'move');
     const mutationId = client.ops.mock.calls[0]?.[3]?.clientMutationId;
@@ -101,11 +104,11 @@ describe('recovery and concurrent authority regressions', () => {
     expect(client.ops).toHaveBeenCalledTimes(1);
   });
   it('does not duplicate user history when identified WS acceptance arrives before a lost HTTP response', async () => {
-    const { session, client } = harness({ mutationIdentity: true });
+    const { session, client } = await harness({ mutationIdentity: true });
     const ack = deferred<{ version: number }>();
     client.ops.mockImplementationOnce(() => ack.promise);
     const result = session.editGroup(move, 'move');
-    await Promise.resolve();
+    await settleDispatch();
     const mutationId = client.ops.mock.calls[0]?.[3]?.clientMutationId;
     await session.receiveAuthoritative({
       version: 1,
@@ -119,7 +122,7 @@ describe('recovery and concurrent authority regressions', () => {
     expect(session.getState().pending).toHaveLength(0);
   });
   it('reconciles a high ACK by fetching authority, but exposes missing preimages rather than fake undo', async () => {
-    const { session, client, setServer } = harness();
+    const { session, client, setServer } = await harness();
     const ai: Op[] = [{ op: 'text.update', clipId: 't', content: 'AI' }];
     const newer = applyOps(applyOps(fixture(), ai), move);
     setServer(newer);
@@ -129,10 +132,13 @@ describe('recovery and concurrent authority regressions', () => {
     expect(session.getState().history[0]?.available).toBe(false);
     expect(session.getState().canUndo).toBe(false);
   });
-  it('cancels a removed active clip when recovery arrives as a snapshot instead of an op', () => {
+  it('cancels a removed active clip when recovery arrives as a snapshot instead of an op', async () => {
     const selectionRemoved = vi.fn();
     const toast = vi.fn();
-    const { session } = harness({ selectionRemoved, notifications: { toast } });
+    const { session } = await harness({
+      selectionRemoved,
+      notifications: { toast },
+    });
     session.beginEdit({ clipIds: ['c'], label: 'move', source: 'timeline' });
     session.replaceSnapshot({
       project: applyOps(fixture(), [{ op: 'clip.remove', id: 'c' }]),
@@ -144,8 +150,8 @@ describe('recovery and concurrent authority regressions', () => {
       'kimo removed a clip you were editing · undo',
     );
   });
-  it('keeps mine explicitly even when no keystroke preceded the collision; use it updates words too', () => {
-    const { session } = harness();
+  it('keeps mine explicitly even when no keystroke preceded the collision; use it updates words too', async () => {
+    const { session } = await harness();
     const id = session.beginEdit({
       clipIds: ['t'],
       label: 'title text',
@@ -189,7 +195,7 @@ describe('recovery and concurrent authority regressions', () => {
       });
   });
   it('does not call an invalid/nonadvancing HTTP acknowledgement saved', async () => {
-    const { session, client } = harness();
+    const { session, client } = await harness();
     client.ops.mockResolvedValueOnce({ version: 0 });
     expect((await session.editGroup(move, 'move')).status).toBe('unknown');
     expect(session.getState().pending).toHaveLength(1);
@@ -200,7 +206,7 @@ describe('recovery and concurrent authority regressions', () => {
     const key = 'kimo:editing:1:s:p';
     const raw = '{not valid json';
     storage.setItem(key, raw);
-    const { session, client } = harness({ storage });
+    const { session, client } = await harness({ storage });
     expect(session.getState().saveStatus).toBe('unsaved');
     await session.flush();
     session.dispose();
@@ -208,11 +214,12 @@ describe('recovery and concurrent authority regressions', () => {
     expect(client.ops).not.toHaveBeenCalled();
   });
   it('aborts read and write signals and prevents disposed snapshot callbacks from leaking', async () => {
-    const { session, client } = harness();
+    const { session, client } = await harness();
     const snapshot =
       deferred<Awaited<ReturnType<EditContext['client']['session']>>>();
     client.session.mockImplementationOnce(() => snapshot.promise);
     const receiving = session.receiveAuthoritative({ version: 3, ops: [] });
+    await settleDispatch();
     const signal = client.session.mock.calls[0]?.[1]?.signal;
     session.dispose();
     expect(signal?.aborted).toBe(true);
@@ -225,7 +232,7 @@ describe('recovery and concurrent authority regressions', () => {
     expect(session.getState().acknowledgedVersion).toBe(0);
   });
   it('isolates a failing integration callback from an acknowledged server write', async () => {
-    const { session } = harness({
+    const { session } = await harness({
       projectChanged: () => {
         throw new Error('broken UI subscriber');
       },
@@ -239,7 +246,7 @@ describe('recovery and concurrent authority regressions', () => {
   });
 });
 describe('field inverse precision and atomic command recovery', () => {
-  it('undoes ordered effect changes while preserving an unrelated later AI parameter and effect', () => {
+  it('undoes ordered effect changes while preserving an unrelated later AI parameter and effect', async () => {
     const p = fixture();
     p.clips.c.effects = [
       { id: 'a', kind: 'blur', params: { radius: 1 } },
@@ -292,7 +299,7 @@ describe('field inverse precision and atomic command recovery', () => {
       { id: 'extra', kind: 'sharpen', params: { amount: 1 } },
     ]);
   });
-  it('undoes detach including a newly-created empty track and preserves unrelated later AI properties', () => {
+  it('undoes detach including a newly-created empty track and preserves unrelated later AI properties', async () => {
     const p = fixture();
     p.tracks = p.tracks.filter((track) => track.kind !== 'audio');
     p.clips.c.keyframes = [
@@ -334,7 +341,7 @@ describe('field inverse precision and atomic command recovery', () => {
       Object.values(reverted.clips).some((clip) => clip.kind === 'audio'),
     ).toBe(false);
   });
-  it('extends ripple-in from source headroom even when the timeline clip starts at zero', () => {
+  it('extends ripple-in from source headroom even when the timeline clip starts at zero', async () => {
     const p = fixture();
     const next = applyOps(
       p,
@@ -346,7 +353,7 @@ describe('field inverse precision and atomic command recovery', () => {
 
 describe('optional-field undo defaults and action boundaries', () => {
   it('undoes and redoes a newly-set clip lock without trying to remove a locked clip', async () => {
-    const { session } = harness();
+    const { session } = await harness();
     await session.editGroup(
       [{ op: 'clip.update', id: 'c', patch: { locked: true } }],
       'lock',
@@ -358,7 +365,7 @@ describe('optional-field undo defaults and action boundaries', () => {
     expect(session.getState().project.clips.c?.locked).toBe(true);
   });
   it('restores an absent solo flag to its explicit false default', async () => {
-    const { session } = harness();
+    const { session } = await harness();
     await session.editGroup(
       [{ op: 'track.update', id: 'aud', patch: { solo: true } }],
       'solo',
@@ -370,7 +377,7 @@ describe('optional-field undo defaults and action boundaries', () => {
     ).toBe(false);
   });
   it('reverts repeated streamed writes with the same actual action ID to the first preimage', async () => {
-    const { session, setServer } = harness();
+    const { session, setServer } = await harness();
     const a: Op[] = [{ op: 'text.update', clipId: 't', content: 'one' }];
     const b: Op[] = [{ op: 'text.update', clipId: 't', content: 'two' }];
     const first = applyOps(fixture(), a);
@@ -398,7 +405,7 @@ describe('optional-field undo defaults and action boundaries', () => {
       'hello world',
     );
   });
-  it('undoes same-count text words without overwriting unrelated later timing changes', () => {
+  it('undoes same-count text words without overwriting unrelated later timing changes', async () => {
     const p = fixture();
     const text = p.clips.t.text;
     if (!text) throw new Error('Fixture text missing');
@@ -439,7 +446,7 @@ describe('optional-field undo defaults and action boundaries', () => {
 
 describe('nested intent rebasing rather than stale full-object replacement', () => {
   it('merges a drag/numeric transform draft with queued AI rotation at release', async () => {
-    const { session, setServer } = harness();
+    const { session, setServer } = await harness();
     const p = fixture();
     const id = session.beginEdit({
       clipIds: ['c'],
@@ -475,7 +482,7 @@ describe('nested intent rebasing rather than stale full-object replacement', () 
   });
   it('rebases a nested patch through 409 and an offline reload without erasing an agent field', async () => {
     const storage = memoryStorage();
-    const a = harness({ storage, online: () => false });
+    const a = await harness({ storage, online: () => false });
     const p = fixture();
     await a.session.editGroup(
       [
@@ -488,6 +495,7 @@ describe('nested intent rebasing rather than stale full-object replacement', () 
       'x',
     );
     a.session.dispose();
+    await a.session.closed();
     const ai: Op[] = [
       {
         op: 'clip.update',
@@ -496,14 +504,14 @@ describe('nested intent rebasing rather than stale full-object replacement', () 
       },
     ];
     const newer = applyOps(p, ai);
-    const b = harness({ storage, project: newer });
+    const b = await harness({ storage, project: newer });
     b.setServer(newer);
     await b.session.flush();
     expect(b.session.getState().project.clips.c?.transform).toMatchObject({
       x: 10,
       rotation: 90,
     });
-    const c = harness();
+    const c = await harness();
     c.setServer(newer);
     c.client.ops.mockRejectedValueOnce(new ApiError(409, 'stale'));
     expect(
@@ -526,3 +534,20 @@ describe('nested intent rebasing rather than stale full-object replacement', () 
     });
   });
 });
+
+const persistenceByStorage = new WeakMap<
+  object,
+  ReturnType<typeof testPersistence>
+>();
+function persistenceFor(storage?: EditContext['storage']) {
+  if (!storage) return testPersistence().persistence;
+  let adapter = persistenceByStorage.get(storage);
+  if (!adapter) {
+    adapter = testPersistence();
+    persistenceByStorage.set(storage, adapter);
+  }
+  return adapter.persistence;
+}
+async function settleDispatch() {
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+}

@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import { Providers } from './providers';
 import './globals.css';
+// Per-response CSP nonces require request-rendered HTML, not static inline-script HTML.
+export const dynamic = 'force-dynamic';
 export const metadata: Metadata = {
   metadataBase: new URL(
     process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000',
@@ -17,7 +19,12 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <Providers>{children}</Providers>
+        <a className="skip-link" href="#route-main">
+          skip to content
+        </a>
+        <div id="route-main" tabIndex={-1}>
+          <Providers>{children}</Providers>
+        </div>
       </body>
     </html>
   );

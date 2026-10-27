@@ -25,7 +25,13 @@ import {
 import type { Clip, Op, Track } from '@kimo/client';
 import { clipLabel } from '@/lib/editing/display';
 import { trimClip } from '@/lib/editing/commands';
-import { canvasBounds, rowHeight, timecode, visibleClips } from './geometry';
+import {
+  canvasBounds,
+  rowHeight,
+  timecode,
+  visibleClips,
+  validTimelineBeats,
+} from './geometry';
 import { drawTrack, readPalette } from './draw-track';
 import { AgentClipMotion } from './animation';
 import { transitionChips } from './transitions';
@@ -34,6 +40,7 @@ import type { TimelineEditorProps } from './types';
 import styles from './timeline.module.css';
 interface TrackRowProps extends Pick<
   TimelineEditorProps,
+  | 'beats'
   | 'project'
   | 'assets'
   | 'editing'
@@ -130,6 +137,9 @@ export function TrackRow(props: TrackRowProps) {
       last = now;
       drawTrack(ctx, {
         clips: visible,
+        beats: validTimelineBeats(project, props.beats).filter(
+          (beat) => beat.trackId === track.id,
+        ),
         track,
         assets,
         width: bounds.width,
@@ -176,6 +186,7 @@ export function TrackRow(props: TrackRowProps) {
     bounds.width,
     bounds.ratio,
     props.activeClipId,
+    props.beats,
     visible,
   ]);
   const edit = (ops: Op[], label: string) => {

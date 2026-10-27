@@ -1,40 +1,33 @@
-import { test } from '@playwright/test';
-import { routes } from './routes';
-import { installWarmupPreview } from './preview-fixture';
-for (const route of routes) {
-  for (const viewport of [
-    { width: 1440, height: 900 },
-    { width: 390, height: 844 },
-  ]) {
-    test(`screenshots ${route.name} ${viewport.width}`, async ({ page }) => {
-      await page.setViewportSize(viewport);
-      if (route.name === 'warmup') await installWarmupPreview(page);
-      await page.goto(route.path);
-      await page.locator('[data-ready="true"]').waitFor();
-      await page.evaluate(async () => {
-        await document.fonts.ready;
-      });
-      await page.screenshot({
-        path: `docs/screens/phase-${route.phase}-${route.name}-${viewport.width}.png`,
-        fullPage: route.name === 'ui',
-      });
-    });
-  }
-}
+import { expect, test } from '@playwright/test';
+import { openState, stateCases, viewports } from './state-matrix';
 
-for (const route of routes) {
-  test(`screenshots ${route.name} reduced motion`, async ({ page }) => {
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await page.emulateMedia({ reducedMotion: 'reduce' });
-    if (route.name === 'warmup') await installWarmupPreview(page);
-    await page.goto(route.path);
-    await page.locator('[data-ready="true"]').waitFor();
-    await page.evaluate(async () => {
-      await document.fonts.ready;
-    });
-    await page.screenshot({
-      path: `docs/screens/phase-${route.phase}-${route.name}-reduced.png`,
-      fullPage: route.name === 'ui',
-    });
-  });
+// AUTHORED NOT RUN. No baselines captured. Explicit runner authorization is separate.
+// Missing images FAIL rather than silently becoming accepted baselines.
+for (const state of stateCases) {
+  for (const viewport of viewports) {
+    for (const mode of [
+      'default',
+      'reduced-motion',
+      'high-contrast',
+    ] as const) {
+      test(`screenshots ${state.id} ${viewport.width}x${viewport.height} ${mode}`, async ({
+        page,
+      }) => {
+        test.skip(
+          state.fixture === true && process.env.PHASE10_FIXTURE_RUNNER !== '1',
+          'Requires authorized SSR fixture service; see e2e/README.md. Not accepted coverage.',
+        );
+        await page.setViewportSize(viewport);
+        await page.emulateMedia({
+          reducedMotion: mode === 'reduced-motion' ? 'reduce' : 'no-preference',
+          contrast: mode === 'high-contrast' ? 'more' : 'no-preference',
+        });
+        await openState(page, state);
+        await expect(page).toHaveScreenshot(
+          `${state.id}-${viewport.width}x${viewport.height}-${mode}.png`,
+          { fullPage: state.path === '/dev/ui' },
+        );
+      });
+    }
+  }
 }

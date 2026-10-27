@@ -35,8 +35,8 @@ function inputContent(node: HTMLElement, text: string) {
   fireEvent.input(node);
 }
 describe('text fields', () => {
-  it('initially selects all without scrolling and protects native caret/keyboard bubbling', () => {
-    const { editing, project } = setupText();
+  it('initially selects all without scrolling and protects native caret/keyboard bubbling', async () => {
+    const { editing, project } = await setupText();
     const parent = vi.fn();
     document.addEventListener('keydown', parent);
     render(<TimelineTextEditor editing={editing} clip={project.clips.t} />);
@@ -57,8 +57,8 @@ describe('text fields', () => {
     editing.dispose();
   });
   it('inspector and secondary field use one shared live pending value and one blur commit', async () => {
+    const { editing, project, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops } = setupText();
     render(
       <>
         <InspectorTextField
@@ -99,8 +99,8 @@ describe('text fields', () => {
     act(() => editing.dispose());
   });
   it('composition Enter/Escape cannot commit/cancel; end + blur commits exactly once', async () => {
+    const { editing, project, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops } = setupText();
     const finish = vi.fn();
     render(
       <TimelineTextEditor
@@ -125,8 +125,8 @@ describe('text fields', () => {
     act(() => editing.dispose());
   });
   it('timeline Escape cancels timers, restores text and finishes once', async () => {
+    const { editing, project, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops } = setupText();
     const finish = vi.fn();
     render(
       <TimelineTextEditor
@@ -145,16 +145,16 @@ describe('text fields', () => {
     expect(finish).toHaveBeenCalledOnce();
     act(() => editing.dispose());
   });
-  it('non-text clips never expose an inline editing control', () => {
-    const { editing, project } = setupText();
+  it('non-text clips never expose an inline editing control', async () => {
+    const { editing, project } = await setupText();
     render(<TimelineTextEditor editing={editing} clip={project.clips.c} />);
     expect(screen.queryByRole('textbox')).toBeNull();
     editing.dispose();
   });
 });
 describe('viewer editing', () => {
-  it('uses injected measured transform/loaded font with letterbox; selects initial content and hides/restores once', () => {
-    const { editing, project } = setupText();
+  it('uses injected measured transform/loaded font with letterbox; selects initial content and hides/restores once', async () => {
+    const { editing, project } = await setupText();
     const hide = vi.fn(),
       finish = vi.fn();
     const { unmount } = render(
@@ -191,8 +191,8 @@ describe('viewer editing', () => {
     expect(hide).toHaveBeenCalledTimes(2);
     editing.dispose();
   });
-  it('font pending leaves preview visible and creates no edit authority', () => {
-    const { editing, project } = setupText();
+  it('font pending leaves preview visible and creates no edit authority', async () => {
+    const { editing, project } = await setupText();
     const hide = vi.fn();
     render(
       <ViewerTextEditor
@@ -209,8 +209,8 @@ describe('viewer editing', () => {
     editing.dispose();
   });
   it('title Enter inserts newline while caption Enter commits; paste is plain text at native range', async () => {
+    const { editing, project, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops } = setupText();
     if (!project.clips.t.text) throw new Error('expected text fixture');
     project.clips.t.text.style = 'title-bold';
     // Session projection is authoritative: install the title style before mounting.
@@ -246,8 +246,8 @@ describe('viewer editing', () => {
     act(() => editing.dispose());
   });
   it('caption IME Escape is ignored; composition end + Enter commits once and cancels idle', async () => {
+    const { editing, project, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops } = setupText();
     const finish = vi.fn();
     render(
       <ViewerTextEditor
@@ -274,8 +274,8 @@ describe('viewer editing', () => {
     act(() => editing.dispose());
   });
   it('lower third primary and secondary edit in one group; unmount cancels dirty timers and restores persisted preview', async () => {
+    const { editing, project, ops } = await setupText();
     vi.useFakeTimers();
-    const { editing, project, ops } = setupText();
     const hide = vi.fn();
     const { unmount } = render(
       <ViewerTextEditor
@@ -310,9 +310,9 @@ describe('viewer editing', () => {
     expect(editing.getState().draft).toBeNull();
     editing.dispose();
   });
-  it('does not rewrite contenteditable DOM on its own preview echo or move the caret', () => {
+  it('does not rewrite contenteditable DOM on its own preview echo or move the caret', async () => {
+    const { editing, project } = await setupText();
     vi.useFakeTimers();
-    const { editing, project } = setupText();
     render(
       <ViewerTextEditor
         editing={editing}
@@ -345,8 +345,8 @@ describe('viewer editing', () => {
   });
 });
 describe('caption list and suggestions', () => {
-  it('only time click seeks actual parent; caret clicks do not seek and active row follows parent player time', () => {
-    const { editing, project } = setupText();
+  it('only time click seeks actual parent; caret clicks do not seek and active row follows parent player time', async () => {
+    const { editing, project } = await setupText();
     project.clips.title = {
       ...project.clips.t,
       id: 'title',
@@ -373,7 +373,7 @@ describe('caption list and suggestions', () => {
   it.each(['use it', 'keep mine'] as const)(
     'suggestion renders exact hint/actions and resolves core state: %s',
     async (choice) => {
-      const { editing, project } = setupText();
+      const { editing, project } = await setupText();
       render(<InspectorTextField editing={editing} clip={project.clips.t} />);
       const field = screen.getByRole('textbox');
       fireEvent.focus(field);

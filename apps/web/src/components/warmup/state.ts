@@ -13,7 +13,6 @@ export const warmupTiming = {
   fallback: 4000,
   slow: 60000,
   beat: 400,
-  reconnect: [2000, 4000, 8000],
   unfold: 900,
   crossfade: 220,
 } as const;

@@ -19,6 +19,7 @@ import {
 import type { Asset, Clip, KimoProject, Op } from '@kimo/client';
 import { applyOps, effectParameterBounds } from '@kimo/client';
 import { createEditingSession } from '@/lib/editing/session';
+import { testPersistence } from '@/lib/editing/persistence-test-helpers';
 import { InspectorEditor } from './inspector-editor';
 import { NumericField } from './numeric-field';
 import { FieldTransaction } from './transaction';
@@ -89,13 +90,17 @@ const asset: Asset = {
   url: '/fixture.mp4',
   durationSec: 20,
 };
-function harness(project = fixture(), assets: readonly Asset[] = [asset]) {
+async function harness(
+  project = fixture(),
+  assets: readonly Asset[] = [asset],
+) {
   let server = structuredClone(project);
   const ops = vi.fn(async (_session: string, group: Op[], version: number) => {
     server = applyOps(server, group, version + 1);
     return { version: server.version };
   });
   const editing = createEditingSession({
+    persistence: testPersistence().persistence,
     sessionId: 'session',
     project,
     assets,
@@ -108,6 +113,7 @@ function harness(project = fixture(), assets: readonly Asset[] = [asset]) {
       }),
     },
   });
+  await editing.ready();
   const begin = vi.spyOn(editing, 'beginEdit'),
     preview = vi.spyOn(editing, 'previewEdit'),
     commit = vi.spyOn(editing, 'commitEdit'),
@@ -124,7 +130,7 @@ function harness(project = fixture(), assets: readonly Asset[] = [asset]) {
   return { editing, ops, begin, preview, commit, cancel, group, props };
 }
 function live(
-  h: ReturnType<typeof harness>,
+  h: Awaited<ReturnType<typeof harness>>,
   extra: Partial<InspectorEditorProps> = {},
 ) {
   function Live() {
@@ -294,7 +300,7 @@ describe('pure inspector contracts', () => {
 });
 describe('transaction and numeric controls', () => {
   it('previews replace begin baseline, commits once and cancellation sends nothing', async () => {
-    const h = harness(),
+    const h = await harness(),
       tx = new FieldTransaction(h.editing, ['c'], 'x');
     const build =
       (n: number) =>
@@ -330,7 +336,7 @@ describe('transaction and numeric controls', () => {
     expect(h.editing.getState().project.clips.c?.transform.x).toBe(8);
   });
   it('typing, clamping, Enter/blur and reset each produce one group', async () => {
-    const h = harness();
+    const h = await harness();
     render(
       <NumericField
         label="scale"
@@ -380,7 +386,7 @@ describe('transaction and numeric controls', () => {
   it('arrows are ±1 and shift ±10, Escape cancels and canonical reset is exact', async () => {
     const p = fixture();
     if (p.clips.c) p.clips.c.transform.x = 25;
-    const h = harness(p);
+    const h = await harness(p);
     render(
       <NumericField
         label="position X"
@@ -418,7 +424,7 @@ describe('transaction and numeric controls', () => {
 });
 describe('inspector integration', () => {
   it('shows project only without selection; aspect cancel sends none, confirm one real group and callback', async () => {
-    const h = harness(),
+    const h = await harness(),
       reframe = vi.fn();
     live(h, { selection: [], onReframeRequest: reframe });
     expect(screen.getByRole('button', { name: 'Project' })).toBeInTheDocument();
@@ -446,8 +452,8 @@ describe('inspector integration', () => {
     ]);
   });
   it('retains one baseline through real project notes debounce and no duplicate blur commit', async () => {
+    const h = await harness();
     vi.useFakeTimers();
-    const h = harness();
     live(h, { selection: [] });
     const input = screen.getByRole('textbox', {
       name: 'project notes for kimo',
@@ -467,7 +473,7 @@ describe('inspector integration', () => {
     expect(h.commit).toHaveBeenCalledTimes(1);
   });
   it('speed presets/custom and keep pitch write actual typed fields', async () => {
-    const h = harness();
+    const h = await harness();
     live(h);
     fireEvent.click(screen.getByRole('radio', { name: '1.5×' }));
     await waitFor(() => expect(h.ops).toHaveBeenCalledTimes(1));
@@ -476,8 +482,8 @@ describe('inspector integration', () => {
     await waitFor(() => expect(h.ops).toHaveBeenCalledTimes(2));
     expect(h.editing.getState().project.clips.c?.keepPitch).toBe(false);
   });
-  it('missing compare, named LUT, meter hooks are clearly unavailable, not fabricated', () => {
-    const h = harness();
+  it('missing compare, named LUT, meter hooks are clearly unavailable, not fabricated', async () => {
+    const h = await harness();
     live(h);
     expect(screen.getByRole('button', { name: 'before/after' })).toBeDisabled();
     expect(
@@ -506,7 +512,7 @@ describe('inspector integration', () => {
       source: 'user',
       lut: { size: 64, layout: 'tiles_8x8', colorSpace: 'srgb' },
     };
-    const h = harness(p, [asset, lut]);
+    const h = await harness(p, [asset, lut]);
     live(h, { lutAssets: { 'warm film': 'warm-original' } });
     const select = screen.getByRole('combobox', { name: 'LUT' });
     expect(select).toHaveValue('unsupported');
@@ -520,7 +526,7 @@ describe('inspector integration', () => {
     expect(h.editing.getState().project.clips.c?.effects).toEqual([]);
   });
   it('SAM sends exact message only through callback; no mask subject invented', async () => {
-    const h = harness(),
+    const h = await harness(),
       message = vi.fn();
     live(h, {
       onMessage: message,
@@ -556,7 +562,7 @@ describe('inspector integration', () => {
       { id: 'blur1', kind: 'blur', params: { radius: 10 } },
       { id: 'grain1', kind: 'grain', params: { amount: 0.3 } },
     ];
-    const h = harness(p);
+    const h = await harness(p);
     live(h);
     fireEvent.click(screen.getByRole('button', { name: 'disable blur' }));
     await waitFor(() => expect(h.ops).toHaveBeenCalledTimes(1));
@@ -578,7 +584,7 @@ describe('inspector integration', () => {
       c = p.clips.c;
     if (!c) throw new Error('fixture');
     p.clips.other = { ...c, id: 'other', start: 8 };
-    const h = harness(p);
+    const h = await harness(p);
     live(h, { selection: ['c', 'other'] });
     const input = screen.getByRole('textbox', { name: 'position X' });
     fireEvent.focus(input);
@@ -588,8 +594,8 @@ describe('inspector integration', () => {
     expect(h.ops.mock.calls[0]?.[1]).toHaveLength(2);
     expect(h.editing.getState().project.clips.other?.transform.x).toBe(77);
   });
-  it('one running property owns orange styling in a panel', () => {
-    const h = harness();
+  it('one running property owns orange styling in a panel', async () => {
+    const h = await harness();
     live(h, {
       propertyActivity: [
         {
@@ -608,8 +614,8 @@ describe('inspector integration', () => {
     });
     expect(document.querySelectorAll('[data-acting="true"]')).toHaveLength(1);
   });
-  it('collapse persistence is project-scoped local convenience only; mask callback resets on unmount', () => {
-    const h = harness(),
+  it('collapse persistence is project-scoped local convenience only; mask callback resets on unmount', async () => {
+    const h = await harness(),
       onMaskOpen = vi.fn(),
       storage = { getItem: vi.fn(() => null), setItem: vi.fn() };
     const view = live(h, { onMaskOpen, storage });
@@ -690,8 +696,8 @@ function sendPointer(
 }
 describe('inspector additional edge cases', () => {
   it('scrubs at 8px per unit, shift 10x, sends only on release and cancels lost capture', async () => {
+    const h = await harness();
     vi.useFakeTimers();
-    const h = harness();
     render(
       <NumericField
         label="drag value"
@@ -732,8 +738,8 @@ describe('inspector additional edge cases', () => {
     expect(h.cancel).toHaveBeenCalled();
     expect(h.ops).toHaveBeenCalledTimes(1);
   });
-  it('invalid numeric blur abandons the whole edit instead of sending stale intermediate input', () => {
-    const h = harness();
+  it('invalid numeric blur abandons the whole edit instead of sending stale intermediate input', async () => {
+    const h = await harness();
     render(
       <NumericField
         label="finite"
@@ -753,12 +759,12 @@ describe('inspector additional edge cases', () => {
     expect(h.ops).not.toHaveBeenCalled();
     expect(h.cancel).toHaveBeenCalledTimes(1);
   });
-  it('clip and track locks prevent numeric edits and preserve current project', () => {
+  it('clip and track locks prevent numeric edits and preserve current project', async () => {
     const p = fixture(),
       c = p.clips.c;
     if (!c) throw new Error('fixture');
     c.locked = true;
-    const h = harness(p);
+    const h = await harness(p);
     live(h);
     expect(screen.getByRole('textbox', { name: 'position X' })).toBeDisabled();
     expect(screen.getByRole('switch', { name: 'keep pitch' })).toBeDisabled();
@@ -777,7 +783,7 @@ describe('inspector additional edge cases', () => {
       secondaryContent: 'world',
       style: 'lower_third',
     };
-    const h = harness(p);
+    const h = await harness(p);
     live(h);
     expect(
       within(screen.getByRole('combobox', { name: 'text style' })).getAllByRole(
@@ -825,7 +831,7 @@ describe('inspector additional edge cases', () => {
     p.tracks = p.tracks.map((t) => ({ ...t, kind: 'text', height: 48 }));
     delete c.assetId;
     c.text = { content: 'hello', style: 'caption-clean' };
-    const h = harness(p);
+    const h = await harness(p);
     live(h);
     const picker = screen.getByLabelText('custom text colour');
     fireEvent.focus(picker);
@@ -864,7 +870,7 @@ describe('inspector additional edge cases', () => {
         license: 'CC BY 4.0',
       },
     };
-    const h = harness(p, [source]),
+    const h = await harness(p, [source]),
       replace = vi.fn();
     live(h, { onReplace: replace });
     expect(screen.getByText('found on museum.example')).toBeInTheDocument();
@@ -890,8 +896,8 @@ describe('inspector additional edge cases', () => {
     ]);
     expect(h.ops).not.toHaveBeenCalled();
   });
-  it('compare button delegates actual viewer toggle without changing project ops', () => {
-    const h = harness(),
+  it('compare button delegates actual viewer toggle without changing project ops', async () => {
+    const h = await harness(),
       onChange = vi.fn();
     live(h, { compare: { available: true, enabled: false, onChange } });
     fireEvent.click(screen.getByRole('button', { name: 'before/after' }));
@@ -909,7 +915,7 @@ describe('inspector additional edge cases', () => {
         params: { exposure: 2, lutAssetId: 'identity' },
       },
     ];
-    const h = harness(p);
+    const h = await harness(p);
     live(h);
     expect(screen.getByRole('combobox', { name: 'LUT' })).toHaveValue(
       'unsupported',
@@ -932,7 +938,7 @@ describe('inspector additional edge cases', () => {
     expect(crop?.b).toBe(0);
   });
   it('numeric audio edits convert dB to linear gain, fades clamp to clip duration and duck is typed', async () => {
-    const h = harness();
+    const h = await harness();
     live(h);
     const volume = screen.getByRole('textbox', { name: 'volume' });
     fireEvent.focus(volume);
@@ -950,8 +956,8 @@ describe('inspector additional edge cases', () => {
     await waitFor(() => expect(h.ops).toHaveBeenCalledTimes(3));
     expect(h.editing.getState().project.clips.c?.duckUnderVoice).toBe(true);
   });
-  it('mask preview checker references its own 8px pattern and callback closes on selection removal', () => {
-    const h = harness(),
+  it('mask preview checker references its own 8px pattern and callback closes on selection removal', async () => {
+    const h = await harness(),
       onMaskOpen = vi.fn();
     const view = render(
       <InspectorEditor {...h.props} onMaskOpen={onMaskOpen} />,
@@ -1028,7 +1034,7 @@ describe('final field contracts', () => {
       { id: 'e1', kind: 'blur', params: { radius: 8 }, enabled: false },
       { id: 'e2', kind: 'grain', params: { amount: 0.2 } },
     ];
-    const h = harness(p);
+    const h = await harness(p);
     live(h);
     const source = screen.getByRole('button', { name: 'drag blur' }),
       target = screen.getByRole('button', { name: 'drag grain' }).closest('li');
@@ -1046,7 +1052,7 @@ describe('final field contracts', () => {
       params: { radius: 8 },
     });
   });
-  it('a centred title reports middle placement rather than pretending it is at bottom', () => {
+  it('a centred title reports middle placement rather than pretending it is at bottom', async () => {
     const p = fixture(),
       c = p.clips.c;
     if (!c) throw new Error('fixture');
@@ -1054,14 +1060,14 @@ describe('final field contracts', () => {
     delete c.assetId;
     c.text = { content: 'title', style: 'title-serif' };
     p.tracks = p.tracks.map((t) => ({ ...t, kind: 'text', height: 48 }));
-    const h = harness(p);
+    const h = await harness(p);
     live(h);
     expect(screen.getByRole('radio', { name: 'middle' })).toHaveAttribute(
       'aria-checked',
       'true',
     );
   });
-  it('text style action property owns one orange treatment and clears when the action ends', () => {
+  it('text style action property owns one orange treatment and clears when the action ends', async () => {
     const p = fixture(),
       c = p.clips.c;
     if (!c) throw new Error('fixture');
@@ -1069,7 +1075,7 @@ describe('final field contracts', () => {
     delete c.assetId;
     c.text = { content: 'title', style: 'title-serif' };
     p.tracks = p.tracks.map((t) => ({ ...t, kind: 'text', height: 48 }));
-    const h = harness(p);
+    const h = await harness(p);
     const activity = [
       {
         clipId: 'c',
@@ -1101,9 +1107,9 @@ describe('final field contracts', () => {
     );
     expect(document.querySelectorAll('[data-acting="true"]')).toHaveLength(0);
   });
-  it('project notes IME does not preview or commit until composition ends; Escape discards', () => {
+  it('project notes IME does not preview or commit until composition ends; Escape discards', async () => {
+    const h = await harness();
     vi.useFakeTimers();
-    const h = harness();
     live(h, { selection: [] });
     const input = screen.getByRole('textbox', {
       name: 'project notes for kimo',
@@ -1121,8 +1127,8 @@ describe('final field contracts', () => {
     expect(h.ops).not.toHaveBeenCalled();
     expect(h.cancel).toHaveBeenCalledTimes(1);
   });
-  it('unmount cancels an active numeric draft and never sends an edit after cleanup', () => {
-    const h = harness();
+  it('unmount cancels an active numeric draft and never sends an edit after cleanup', async () => {
+    const h = await harness();
     const view = render(
       <NumericField
         label="cleanup"
@@ -1163,8 +1169,8 @@ function textFixture(
 }
 describe('actual writer-owned text bridge', () => {
   it('primary and secondary fields share one real text.update group with preserved word timings', async () => {
+    const h = await harness(textFixture());
     vi.useFakeTimers();
-    const h = harness(textFixture());
     live(h);
     const primary = screen.getByRole('textbox', { name: 'text content' }),
       secondary = screen.getByRole('textbox', { name: 'secondary text' });
@@ -1194,8 +1200,8 @@ describe('actual writer-owned text bridge', () => {
       },
     ]);
   });
-  it('dedicated caption mode imports real controls and uses actual parent seek', () => {
-    const h = harness(textFixture('caption-clean')),
+  it('dedicated caption mode imports real controls and uses actual parent seek', async () => {
+    const h = await harness(textFixture('caption-clean')),
       seek = vi.fn();
     live(h, { captionTrackId: 'v', onSeek: seek });
     expect(
@@ -1217,8 +1223,8 @@ describe('actual writer-owned text bridge', () => {
     );
     expect(seek).toHaveBeenCalledWith(2);
   });
-  it('caption mode without a real seek hook is explicitly unavailable, never a dummy callback', () => {
-    const h = harness(textFixture('caption-clean'));
+  it('caption mode without a real seek hook is explicitly unavailable, never a dummy callback', async () => {
+    const h = await harness(textFixture('caption-clean'));
     live(h, { captionTrackId: 'v', onSeek: undefined });
     expect(
       screen.getByText(
@@ -1229,10 +1235,10 @@ describe('actual writer-owned text bridge', () => {
       screen.queryByRole('region', { name: 'captions editor' }),
     ).not.toBeInTheDocument();
   });
-  it('track-lock fieldset also guards actual imported text inputs', () => {
+  it('track-lock fieldset also guards actual imported text inputs', async () => {
     const p = textFixture();
     p.tracks = p.tracks.map((t) => ({ ...t, locked: true }));
-    const h = harness(p);
+    const h = await harness(p);
     live(h);
     expect(
       screen.getByRole('textbox', { name: 'text content' }),
@@ -1244,8 +1250,8 @@ describe('actual writer-owned text bridge', () => {
   });
 });
 describe('readout and drag cancellation isolation', () => {
-  it('reduced-motion AI readout updates without creating any user edit or network write', () => {
-    const h = harness();
+  it('reduced-motion AI readout updates without creating any user edit or network write', async () => {
+    const h = await harness();
     const build = (n: number): Op[] => [
       { op: 'clip.update', id: 'c', patch: { volume: n } },
     ];
@@ -1276,7 +1282,7 @@ describe('readout and drag cancellation isolation', () => {
     expect(h.preview).not.toHaveBeenCalled();
     expect(h.ops).not.toHaveBeenCalled();
   });
-  it('effect drag soft-lock preview cancels cleanly on dragend without drop', () => {
+  it('effect drag soft-lock preview cancels cleanly on dragend without drop', async () => {
     const p = fixture(),
       clip = p.clips.c;
     if (!clip) throw new Error('fixture');
@@ -1284,7 +1290,7 @@ describe('readout and drag cancellation isolation', () => {
       { id: 'e1', kind: 'blur', params: { radius: 8 } },
       { id: 'e2', kind: 'grain', params: { amount: 0.2 } },
     ];
-    const h = harness(p);
+    const h = await harness(p);
     live(h);
     const source = screen.getByRole('button', { name: 'drag blur' }),
       target = screen.getByRole('button', { name: 'drag grain' }).closest('li');
@@ -1305,8 +1311,8 @@ describe('readout and drag cancellation isolation', () => {
 });
 
 describe('parent audio capability injection', () => {
-  it('disables unsupported pitch preservation without claiming a buffered audio transform', () => {
-    const h = harness();
+  it('disables unsupported pitch preservation without claiming a buffered audio transform', async () => {
+    const h = await harness();
     live(h, {
       audioCapabilities: () => ({
         keepPitch: false,

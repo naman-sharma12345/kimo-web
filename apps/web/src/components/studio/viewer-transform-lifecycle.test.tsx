@@ -2,18 +2,21 @@ import * as React from 'react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import { createEditingSession } from '@/lib/editing/session';
+import { testPersistence } from '@/lib/editing/persistence-test-helpers';
 import { fixture, assets } from '@/lib/editing/test-fixtures';
 import { useViewerTransform } from './viewer-transform';
-function setup() {
+async function setup() {
   const project = fixture(),
     ops = vi.fn().mockResolvedValue({ version: 1 });
   const editing = createEditingSession({
+    persistence: testPersistence().persistence,
     sessionId: 's',
     project,
     assets,
     client: { ops, session: vi.fn() },
     makeId: () => crypto.randomUUID(),
   });
+  await editing.ready();
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'),
     rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
   svg.append(rect);
@@ -51,7 +54,7 @@ function setup() {
   };
 }
 it('coalesces local pointer previews and sends one final transform batch on release', async () => {
-  const s = setup();
+  const s = await setup();
   try {
     act(() => s.hook.result.current(s.start, 'c', 'move'));
     act(() => {
@@ -72,8 +75,8 @@ it('coalesces local pointer previews and sends one final transform batch on rele
     s.close();
   }
 });
-it('cancels on pointer cancellation or unmount without dispatching a write', () => {
-  const s = setup();
+it('cancels on pointer cancellation or unmount without dispatching a write', async () => {
+  const s = await setup();
   try {
     act(() => s.hook.result.current(s.start, 'c', 'move'));
     act(() => {
@@ -91,8 +94,8 @@ it('cancels on pointer cancellation or unmount without dispatching a write', () 
     s.close();
   }
 });
-it('a simple selection click does not create a no-op HTTP batch', () => {
-  const s = setup();
+it('a simple selection click does not create a no-op HTTP batch', async () => {
+  const s = await setup();
   try {
     act(() => s.hook.result.current(s.start, 'c', 'move'));
     act(() => s.send('pointerup', 10, 20));

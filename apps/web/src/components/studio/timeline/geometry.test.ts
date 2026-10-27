@@ -1,8 +1,10 @@
+import { projectBeats } from '@/lib/studio-finish';
 import { describe, expect, it } from 'vitest';
 import { deleteClips, trimClip, slipClip } from '@/lib/editing/commands';
 import { displayTracks } from '@/lib/editing/display';
 import { applyOps } from '@kimo/client';
 import {
+  validTimelineBeats,
   canvasBounds,
   clampZoom,
   edgeAt,
@@ -132,4 +134,85 @@ describe('timeline geometry and shared edit semantics', () => {
         ?.duration,
     ).toBeCloseTo(1 / 30);
   });
+});
+
+describe('optional actual beat snap candidates', () => {
+  const music = () =>
+    clip('music', {
+      kind: 'audio',
+      trackId: 'music-track',
+      audioRole: 'music',
+      start: 0,
+      duration: 20,
+      in: 2,
+      speed: 2,
+    });
+  it('uses detected beats in the same 8px pool for trim/time and multi-edge moves', () => {
+    const p = project(
+      [clip(), music()],
+      [track(), track('music-track', 'audio')],
+    );
+    const beats = [{ clipId: 'music', trackId: 'music-track', time: 9.5 }];
+    expect(snapTime(p, 9.57, 100, ['a'], 0, beats)).toEqual({
+      time: 9.5,
+      guide: 9.5,
+    });
+    expect(snapTime(p, 9.581, 100, ['a'], 0, beats).guide).toBeUndefined();
+    expect(snapDelta(p, ['a'], 2.56, 100, 0, beats)).toEqual({
+      delta: 2.5,
+      guide: 9.5,
+    });
+    expect(snapTime(p, 9.57, 100, ['a'], 0).guide).toBeUndefined();
+    expect(
+      snapTime(p, 9.57, 100, ['a', 'music'], 0, beats).guide,
+    ).toBeUndefined();
+  });
+  it('keeps existing earlier-time tie ordering and does not infer beats from marker labels', () => {
+    const p = project([music()], [track('music-track', 'audio')]);
+    p.markers = [{ id: 'marker', time: 9, label: 'ordinary marker' }];
+    expect(
+      snapTime(p, 9.5, 8, [], 0, [
+        { clipId: 'music', trackId: 'music-track', time: 10 },
+      ]).guide,
+    ).toBe(9);
+    expect(snapTime(p, 9.5, 8, [], 0).guide).toBe(9);
+  });
+});
+
+it('retains real trim/speed projection and rejects missing, wrong, nonmusic or hidden identities', () => {
+  const music = clip('music', {
+    kind: 'audio',
+    trackId: 'aud',
+    audioRole: 'music',
+    start: 3,
+    duration: 2,
+    in: 4,
+    speed: 2,
+  });
+  const p = project([music], [track('aud', 'audio')]);
+  const beats = projectBeats(p, [
+    {
+      assetId: 'source',
+      sourceTimes: [3, 4, 5, 6, 8],
+      provenance: 'producer-detected',
+    },
+  ]);
+  expect(validTimelineBeats(p, beats).map((beat) => beat.time)).toEqual([
+    3, 3.5, 4,
+  ]);
+  expect(validTimelineBeats(p, [...beats, ...beats])).toHaveLength(3);
+  expect(
+    validTimelineBeats(p, [
+      { clipId: 'missing', trackId: 'aud', time: 3 },
+      { clipId: 'music', trackId: 'wrong', time: 3 },
+      { clipId: 'music', trackId: 'aud', time: NaN },
+      { clipId: 'music', trackId: 'aud', time: 5 },
+    ]),
+  ).toEqual([]);
+  p.clips.music = { ...music, audioRole: 'voice' };
+  expect(validTimelineBeats(p, beats)).toEqual([]);
+  p.clips.music = music;
+  const row = p.tracks[0];
+  if (row) row.hidden = true;
+  expect(validTimelineBeats(p, beats)).toEqual([]);
 });

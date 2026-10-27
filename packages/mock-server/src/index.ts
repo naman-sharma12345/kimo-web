@@ -149,11 +149,23 @@ export function createMockServer(
     )
       throw new Error('expected empty object');
   };
-  const emit = (s: Session, event: ServerEvent) => {
+  const record = (s: Session, event: ServerEvent): ServerEvent => {
     if (event.t === 'agent.action.start') {
       const actionIds = (s.snapshot.actionIds ??= []);
       if (!actionIds.includes(event.id)) actionIds.push(event.id);
     }
+    if (
+      event.t === 'agent.status' ||
+      event.t === 'agent.action.start' ||
+      event.t === 'agent.action.end' ||
+      event.t === 'agent.message' ||
+      event.t === 'error'
+    )
+      (s.snapshot.agentHistory ??= []).push(structuredClone(event));
+    return event;
+  };
+  const emit = (s: Session, event: ServerEvent) => {
+    record(s, event);
     for (const ws of s.sockets)
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(event));
   };
@@ -977,6 +989,7 @@ export function createMockServer(
           snapshot: {
             status: 'warming',
             actionIds: [],
+            agentHistory: [],
             editExpiresAt: new Date(
               Date.now() + (options.editTtlMs ?? 86400000),
             ).toISOString(),
@@ -1401,11 +1414,13 @@ export function createMockServer(
         }
       } catch {
         ws.send(
-          JSON.stringify({
-            t: 'error',
-            code: 'INVALID_PACKET',
-            message: 'invalid client packet',
-          }),
+          JSON.stringify(
+            record(s, {
+              t: 'error',
+              code: 'INVALID_PACKET',
+              message: 'invalid client packet',
+            }),
+          ),
         );
       }
     });

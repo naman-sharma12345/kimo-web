@@ -1,0 +1,44 @@
+name: Source quality and actual JS budgets
+on:
+  pull_request:
+  push:
+permissions:
+  contents: read
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install existing synthetic-fixture prerequisite
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install locked workspace dependencies
+        run: pnpm install --frozen-lockfile --prod=false
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Test budget checker including fail-closed and negative controls
+        run: node --test scripts/budget.test.mjs
+      - run: pnpm build
+      - name: Enforce actual build gzip budgets
+        run: node scripts/budget-check.mjs --build-dir apps/web/.next --json quality-reports/budget.json --markdown quality-reports/budget.md
+      - name: Publish budget evidence, including budget failure reports
+        if: always() && hashFiles('quality-reports/budget.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: actual-js-budgets
+          path: quality-reports/budget.*
+          if-no-files-found: error
+          retention-days: 7

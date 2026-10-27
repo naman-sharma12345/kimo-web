@@ -295,3 +295,48 @@ Review/poster validation passed 341 tests in 11 files. Contract/mock validation 
 - [ ] Genuine full approve-to-render-to-delivery recordings captured and inspected.
 
 No GPU pixels, production composition/audio/captions, native sharing, public edit authorization, durable service or final deployment acceptance is inferred from source tests. Phase 10 remains outstanding. No authoritative production REST/WS deployment has yet been located; final contracts require that service, not a guessed marketing/MCP endpoint.
+
+### Verified Phase 9 checkpoint and bounded browser result
+
+The settled Phase 9 source passed lint, strict TypeScript, 900 tests in 88 files and production build with all 399 gated paths unchanged. Published commit `0fd12a0905c08ae7f798251caf05953d78118ce8` contains 396 verified public files, 61 upserts and no deletions or mode changes. Publication alone is not visual or production acceptance.
+
+The single bounded hosted checkpoint selected 9:16 and submitted one synthetic prompt. A browser restart occurred before a Studio URL/session identity became observable. No prompt was repeated, no approval was attempted, and no review/render/delivery screenshots or acceptance pass are claimed. The workflow's stop/remove cleanup succeeded at 06:22:26 UTC on 2026-10-27; the job completed at 06:22:28 UTC.
+
+## Phase 10 source hardening, acceptance open
+
+Implemented native asynchronous IndexedDB outbox hydration and ordered persistence, verified legacy migration, exclusive native Web Locks, durable unknown-delivery records before HTTP, and predecessor-close barriers. Reconnect performs authoritative reads before each fresh socket, reconciles hello versions and buffered events, and uses ongoing bounded exponential backoff. Unsupported storage fails closed; tests inject an explicit asynchronous persistence adapter rather than bypassing readiness.
+
+Production client configuration requires explicit HTTPS/WSS destinations. SSR creates request-scoped clients and forwards cookies only to an approved exact origin. Per-response nonce CSP, minimal permissions, local fonts, route errors and focus restoration are authored. These do not establish backend OAuth, CSRF, anonymous quota, retention policy, real media CORS or deployment acceptance.
+
+Initial independent Phase 9 manifest measurements were 236,384 modern gzip bytes for landing (FAIL against 120,000) and 351,587 for Studio (PASS against 450,000); the separate conditional nomodule polyfill was 39,520 bytes. Landing now defers the full interaction graph until a real gesture, preserving input, files, focus and IME. The fresh integrated build measures 115,339 modern effective initial gzip bytes for landing and 366,034 for Studio, both within their 120,000 / 450,000 limits. Studio includes the automatically loaded provider chunk; conditional nomodule costs remain separately reported. See PERFORMANCE.md. The budget checker passes 43 tests including fail-closed automatic provider accounting; this is not a claim that the application meets its budget.
+
+Typed diagnostics collect only allowlisted counters, durations and operation categories, with no default collector or identity/text/name collection. Timing hooks skip unavailable starts and restored completion; render-start requires successful approval. Recorded agent presentation history is an optional producer capability, restored without edit/transport/attention replay. Mock history remains process-local, not production persistence.
+
+The first integrated unit run found fixture readiness regressions: 1,037 passed, 46 failed and one live-backend test skipped. Readiness fixtures were repaired without weakening production guards or their assertions; scoped inspector/text checks passed 90 tests and store checks passed four. After final integration, a fresh stable sequence passed lint, strict TypeScript, 1,114 tests in 113 files and production build with 473 source paths unchanged. One live-backend test remains explicitly skipped. The final documentation-only evidence update is followed by another stability sequence before publication.
+
+- [ ] Real backend connected and all live REST/WS contracts verified.
+- [ ] Backend Google auth, anonymous daily limit, server-side caps and policy verified.
+- [x] Required privacy copy and route authored; normal-mode cream-38 contrast exception recorded.
+- [x] STATES inventory and A11Y ledger authored, with evidence levels distinguished.
+- [ ] Every polish state visually reviewed at target viewports and 200% zoom.
+- [ ] WCAG 2.2 AA verified, including real VoiceOver and NVDA.
+- [ ] Fresh application gzip budgets met; runtime LCP/CLS/INP/FPS/memory measured.
+- [x] CI budget enforcement and negative checks authored without new dependencies.
+- [ ] Full browser/device/failure matrix passed and genuine visual baselines committed.
+- [x] Allowlisted analytics adapters, timing hooks and env-gated route reporting authored.
+- [ ] Real approved analytics/error collectors and cloud region verified.
+- [ ] Production deployment at app.getkimo.tech and live headers/CORS/cookies verified.
+- [ ] All extra-feature producer capabilities shipped and verified, including synchronized compare, restore and alternate renders.
+- [x] README, exact 180-second demo and separate marketing-link proposal authored.
+- [ ] v1.0.0 launch tag issued against the intended verified release.
+
+Command palette, device-local review cuts, detached read-only preview, three coachmarks, supplied real beat projections/snapping and timed-caption export models are implemented. Missing producer capabilities remain explicitly unavailable: compare cannot claim synchronized dual compositions, restore lacks an agreed replacement contract, and alternate export/reframe/caption output needs actual service support. No GPU, engine output, audio/caption composition, platform assistive technology, performance or launch pass follows from deterministic tests.
+
+### Phase 10 measured source checkpoint
+
+- [x] Actual modern initial gzip budgets: landing 115,339 / 120,000 bytes; Studio 366,034 / 450,000 bytes, including 2,438 bytes of automatically loaded providers.
+- [x] All framework/shared runtime bytes included; 39,520 conditional nomodule bytes disclosed separately.
+- [x] Stable lint / strict TypeScript / 1,114 passing unit tests / production build completed on 473 unchanged source paths before this evidence-only documentation update.
+- [ ] LCP, INP, CLS, 50-clip FPS and 20-minute memory budgets measured on specified hardware.
+
+These are frontend source and manifest results, not a production launch. Live service contracts, real render/audio/caption fidelity, hosted visual checks, accessibility platforms and deployment remain open as listed above.

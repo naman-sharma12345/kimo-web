@@ -37,6 +37,7 @@ export interface StudioSlots {
   reviewOverlay?: React.ReactNode;
   transport?: React.ReactNode;
   timeline?: React.ReactNode;
+  timelineActions?: React.ReactNode;
   timelineFooter?: React.ReactNode;
   /** A functional timeline already owns its ruler, scrollbars and footer. */
   timelineOwnsChrome?: boolean;
@@ -413,6 +414,7 @@ export function TimelinePanel({
           aria-pressed={state.linked}
           onClick={() => useStudio.setState({ linked: !state.linked })}
         />
+        {slots.timelineActions}
         <span className="studio-tool-hint">
           {state.tool}
           {slots.timelineOwnsChrome ? '' : ' · editing connects in Phase 7'}
