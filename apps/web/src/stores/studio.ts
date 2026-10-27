@@ -87,6 +87,22 @@ export interface StudioState extends StudioPreferences {
   wsVersion: number | null;
   latencyMs: number | null;
   previewFps: number | null;
+  viewerZoom: 'fit' | '50%' | '100%';
+  guides: boolean;
+  overlays: boolean;
+  fullscreen: boolean;
+  maskSectionOpen: boolean;
+  scrubbing: boolean;
+  scrubAudioEnabled: boolean;
+  seekRevision: number;
+  beginScrubbing: () => void;
+  updateScrubbing: (seconds: number) => void;
+  endScrubbing: (seconds: number) => void;
+  publishPlayback: (
+    seconds: number,
+    playing: boolean,
+    fps: number | null,
+  ) => void;
   playing: boolean;
   playhead: number;
   duration: number;
@@ -125,6 +141,37 @@ export const useStudio = create<StudioState>((set, get) => ({
   wsVersion: null,
   latencyMs: null,
   previewFps: null,
+  viewerZoom: 'fit',
+  guides: false,
+  overlays: true,
+  fullscreen: false,
+  maskSectionOpen: false,
+  scrubbing: false,
+  scrubAudioEnabled: true,
+  seekRevision: 0,
+  beginScrubbing: () =>
+    set({
+      scrubbing: true,
+      playing: false,
+      seekRevision: get().seekRevision + 1,
+    }),
+  updateScrubbing: (seconds) =>
+    set({
+      playhead: Number.isFinite(seconds)
+        ? Math.max(0, Math.min(get().duration, seconds))
+        : get().playhead,
+      seekRevision: get().seekRevision + 1,
+    }),
+  endScrubbing: (seconds) =>
+    set({
+      scrubbing: false,
+      playhead: Number.isFinite(seconds)
+        ? Math.max(0, Math.min(get().duration, seconds))
+        : get().playhead,
+      seekRevision: get().seekRevision + 1,
+    }),
+  publishPlayback: (playhead, playing, previewFps) =>
+    set({ playhead, playing, previewFps }),
   playing: false,
   playhead: 0,
   duration: 0,
@@ -150,6 +197,10 @@ export const useStudio = create<StudioState>((set, get) => ({
       agent: reviewRequested ? 'waiting_user' : 'idle',
       actionIds: [],
       playing: false,
+      scrubbing: false,
+      fullscreen: false,
+      maskSectionOpen: false,
+      seekRevision: 0,
       playhead: 0,
       connection: 'disconnected',
       wsVersion: null,
@@ -188,7 +239,12 @@ export const useStudio = create<StudioState>((set, get) => ({
       set((s) => ({ timelineCollapsed: !s.timelineCollapsed }));
   },
   seek: (seconds) =>
-    set({ playhead: Math.max(0, Math.min(get().duration, seconds)) }),
+    set({
+      playhead: Number.isFinite(seconds)
+        ? Math.max(0, Math.min(get().duration, seconds))
+        : get().playhead,
+      seekRevision: get().seekRevision + 1,
+    }),
   persist: (key) => {
     const { sizes, agentCollapsed, inspectorCollapsed, timelineCollapsed } =
       get();

@@ -5,6 +5,7 @@
   "exports": "./src/index.ts",
   "scripts": {},
   "dependencies": {
-    "pixi.js": "^8.8.0"
+    "pixi.js": "^8.8.0",
+    "@kimo/client": "workspace:*"
   }
 }

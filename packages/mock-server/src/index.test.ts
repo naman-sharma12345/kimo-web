@@ -62,6 +62,23 @@ describe('mock HTTP and websocket integration', () => {
       expect(await (await fetch(snapshot.assets[0]?.url ?? '')).text()).toBe(
         'abc',
       );
+      const uploadedUrl = snapshot.assets[0]?.url ?? '';
+      const partial = await fetch(uploadedUrl, {
+        headers: { Range: 'bytes=1-2' },
+      });
+      expect(partial.status).toBe(206);
+      expect(partial.headers.get('Content-Range')).toBe('bytes 1-2/3');
+      expect(await partial.text()).toBe('bc');
+      const invalidRange = await fetch(uploadedUrl, {
+        headers: { Range: 'bytes=3-' },
+      });
+      expect(invalidRange.status).toBe(416);
+      const mask = await fetch(`${app.base}/fixtures/mask.png`, {
+        method: 'HEAD',
+      });
+      expect(mask.status).toBe(200);
+      expect(mask.headers.get('Content-Type')).toBe('image/png');
+      expect(Number(mask.headers.get('Content-Length'))).toBeGreaterThan(0);
       expect(await app.client.ops(session.sessionId, [], 0)).toEqual({
         version: 1,
       });

@@ -143,6 +143,9 @@ importers:
 
   packages/compositor:
     dependencies:
+      '@kimo/client':
+        specifier: workspace:*
+        version: link:../kimo-client
       pixi.js:
         specifier: ^8.8.0
         version: 8.22.0

@@ -13,6 +13,7 @@ import { pipeline } from 'node:stream/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { mediaResponse } from './media-response';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
   applyOps,
@@ -203,8 +204,15 @@ export function createMockServer(
       {
         id: 'mask-2',
         kind: 'image' as const,
-        name: 'subject mask',
-        url: `${base}/fixtures/image.png`,
+        name: 'synthetic ellipse mask (not SAM inference)',
+        url: `${base}/fixtures/mask.png`,
+        mask: {
+          encoding: 'luma_image' as const,
+          width: 640,
+          height: 360,
+          coordinateSpace: 'source_uv' as const,
+          channel: 'luma' as const,
+        },
         source: 'user' as const,
       },
     ]) {
@@ -334,6 +342,7 @@ export function createMockServer(
           ...clip('music', 'fixture-music', 'audio'),
           duration: 21,
           volume: 0.3,
+          audioRole: 'music',
         },
       },
       'add_music',
@@ -593,6 +602,8 @@ export function createMockServer(
             'clip-3.mp4',
             'music.wav',
             'image.png',
+            'mask.png',
+            'identity-lut.png',
           ].includes(name)
         ) {
           json(res, 404, { error: 'not found' });
@@ -611,7 +622,7 @@ export function createMockServer(
               ? 'image/png'
               : 'audio/wav',
         );
-        await pipeline(createReadStream(file), res);
+        await mediaResponse(req, res, file);
         return;
       }
       if (path.startsWith('/mock-r2/') && req.method === 'PUT') {
@@ -677,7 +688,7 @@ export function createMockServer(
             ? 'video/mp4'
             : 'application/octet-stream',
         );
-        await pipeline(createReadStream(resolve(data, id)), res);
+        await mediaResponse(req, res, resolve(data, id));
         return;
       }
       if (path === '/v1/uploads' && req.method === 'POST') {

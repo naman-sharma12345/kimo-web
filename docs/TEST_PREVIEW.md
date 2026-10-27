@@ -59,7 +59,8 @@ if a supervisor is forcibly killed. Dispatch again for a new URL and fresh data.
   never a caller-provided destination. Child environments are explicitly
   allowlisted, and Next environment files cause startup to be refused.
 - Known frontend pages, required public assets and Next static assets only.
-  Hidden paths, encoded/traversal paths, workspace/source paths, arbitrary `/api`,
+  Hidden paths, encoded/traversal paths (except encoded dynamic-route brackets
+  in public Next static assets), workspace/source paths, arbitrary `/api`,
   dev pages and Next image fetching are denied. Exact synthetic REST methods and
   session websocket paths are allowlisted. No engine, providers, external backend,
   Eden gateway, credentials or inherited application configuration.
@@ -89,3 +90,9 @@ before serving. Local tests do not establish GitHub runner provisioning, release
 availability, tunnel uptime, browser navigation, SSR restoration, or a real engine
 render. The parent must verify the four full gates and run managed-browser checks
 against the new readiness-marked URL. No local browser or Playwright is used here.
+
+Synthetic file responses support single byte ranges, suffix ranges and HEAD for
+seekable fixture/upload playback. Multiple or unsatisfiable ranges return 416.
+The public host still exposes only the exact synthetic fixture filename list,
+including the original ellipse luma mask and identity LUT; it does not accept
+caller-selected file paths. These are test fixtures, not SAM inference output.

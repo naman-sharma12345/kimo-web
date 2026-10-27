@@ -43,3 +43,25 @@ The actual pnpm mock and pnpm mock:demo commands succeeded. The CLI emitted 45 p
 Repeated execution restarts destroyed local disposable-preview processes before full automatic navigation could be verified. A manually dispatched GitHub Actions preview is being added as a bounded synthetic test environment, not a production deployment. It uses read-only repository permissions, no provider/backend credentials, allowlisted mock routes, and an automatic shutdown. No local browser or Playwright execution is introduced.
 
 `KIMO_API_INTERNAL_URL` optionally routes server-rendered requests to the same typed API over an internal service address; the browser continues using only `NEXT_PUBLIC_KIMO_API`. When unset, existing defaults are unchanged. This prevents a fresh public tunnel's DNS propagation from becoming an SSR dependency. No secrets are embedded or copied into browser configuration.
+
+## Phase 6 preparation, 2026-10-27
+
+- The automatic single-prompt test flow reached Studio through warm-up without
+  forced navigation. This establishes the navigation gate, not compositor
+  acceptance, visual acceptance, or a production deployment.
+- The bounded host rejected Next's percent-encoded dynamic-route brackets in
+  public CSS paths. The correction decodes only `%5B` and `%5D` beneath
+  `/_next/static/`; other escapes, traversal and private paths remain denied.
+  Query strings are preserved using the original path length. A focused
+  regression checks both dynamic-route assets and malicious encodings.
+- Anton and DM Serif Display are bundled with upstream OFL licenses for the
+  specification's video text styles. Provenance and SHA-256 hashes are in
+  `apps/web/public/fonts/SOURCES.md`. Studio chrome retains its existing fonts.
+
+- Phase 6 production compilation requires the compositor's internal client
+  workspace dependency and matching application TypeScript aliases. This links
+  existing source; it is not an additional third-party runtime library.
+- The controller cancels renderer preparations on invalidation while retaining
+  the last submitted frame. Explicit media sample descriptors prevent double
+  application of clip speed and mask timeOrigin, and hold missing transition
+  handles at the actual boundary with rate zero.

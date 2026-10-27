@@ -18,8 +18,13 @@ import { WebSocket, WebSocketServer, type RawData } from 'ws';
 
 const id = '[a-zA-Z0-9_-]+';
 export function route(raw: string, method = 'GET') {
-  // Reject ambiguous encodings and traversal BEFORE URL normalization.
-  const path = raw.split('?')[0] ?? '';
+  // Next encodes dynamic route brackets in public stylesheet/chunk paths.
+  // Decode only those two characters, only in the public static namespace.
+  // All other escapes and traversal remain rejected before URL normalization.
+  const rawPath = raw.split('?')[0] ?? '';
+  const path = rawPath.startsWith('/_next/static/')
+    ? rawPath.replace(/%5b/gi, '[').replace(/%5d/gi, ']')
+    : rawPath;
   if (
     !path.startsWith('/') ||
     /[%\\]/.test(path) ||
@@ -34,7 +39,7 @@ export function route(raw: string, method = 'GET') {
   const allowed = mock
     ? (read &&
         new RegExp(
-          `^/(health|fixtures/(clip-[123]\\.mp4|image\\.png|music\\.wav)|v1/(sessions|renders|videos)/${id}|media/${id})$`,
+          `^/(health|fixtures/(clip-[123]\\.mp4|image\\.png|mask\\.png|identity-lut\\.png|music\\.wav)|v1/(sessions|renders|videos)/${id}|media/${id})$`,
         ).test(target)) ||
       (method === 'POST' &&
         (['/v1/uploads', '/v1/sessions'].includes(target) ||
@@ -48,11 +53,18 @@ export function route(raw: string, method = 'GET') {
         /^\/_next\/static\/[a-zA-Z0-9_./[\]@()-]+$/.test(target) ||
         [
           '/grain.png',
+          '/icon.svg',
           '/brand/kimo-mark.svg',
           '/fonts/instrument-serif-italic.ttf',
+          '/fonts/anton-regular.ttf',
+          '/fonts/dm-serif-display-regular.ttf',
         ].includes(target));
   return allowed
-    ? { mock, path: target + raw.slice(path.length), port: mock ? 8790 : 3106 }
+    ? {
+        mock,
+        path: target + raw.slice(rawPath.length),
+        port: mock ? 8790 : 3106,
+      }
     : null;
 }
 export function validatePreviewUrl(value: unknown): string {

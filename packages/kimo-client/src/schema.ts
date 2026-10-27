@@ -6,6 +6,83 @@ export const attributionSchema = z.object({
   pageUrl: z.string().url(),
   license: z.string().optional(),
 });
+/** Proposed Phase 6 wire metadata; no decoder or backend agreement implied. */
+const unit = z.number().finite().min(0).max(1);
+const pixelSize = z.number().int().positive().safe();
+export const maskMetadataSchema = z.discriminatedUnion('encoding', [
+  z.object({
+    encoding: z.literal('rle'),
+    width: pixelSize,
+    height: pixelSize,
+    fps: z.number().finite().positive(),
+    timeOrigin: sec.optional(),
+    coordinateSpace: z.literal('source_uv'),
+    channel: z.literal('luma'),
+    payloadUrl: z.string().min(1),
+    version: z.literal(1),
+  }),
+  z.object({
+    encoding: z.literal('video'),
+    width: pixelSize,
+    height: pixelSize,
+    fps: z.number().finite().positive(),
+    timeOrigin: sec.optional(),
+    coordinateSpace: z.literal('source_uv'),
+    channel: z.enum(['alpha', 'luma', 'red']),
+  }),
+  z.object({
+    encoding: z.literal('luma_image'),
+    width: pixelSize,
+    height: pixelSize,
+    timeOrigin: sec.optional(),
+    coordinateSpace: z.literal('source_uv'),
+    channel: z.enum(['alpha', 'luma', 'red']),
+  }),
+]);
+export const maskRleFrameSchema = z
+  .object({
+    frameIndex: z.number().int().nonnegative().safe(),
+    width: pixelSize,
+    height: pixelSize,
+    counts: z.array(z.number().int().nonnegative().safe()).min(1),
+  })
+  .superRefine((frame, ctx) => {
+    if (
+      !Number.isSafeInteger(frame.width * frame.height) ||
+      frame.counts.reduce((sum, count) => sum + count, 0) !==
+        frame.width * frame.height
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'RLE runs must cover exactly width * height pixels',
+      });
+  });
+export const lutMetadataSchema = z.object({
+  size: z.literal(64),
+  layout: z.literal('tiles_8x8'),
+  colorSpace: z.literal('srgb'),
+});
+const contentColor = z.tuple([unit, unit, unit, unit]);
+export const shapeSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('rect'),
+    width: z.number().finite().positive(),
+    height: z.number().finite().positive(),
+    radius: sec.optional(),
+    fill: contentColor,
+    stroke: contentColor.optional(),
+    strokeWidth: sec.optional(),
+  }),
+  z.object({
+    kind: z.literal('line'),
+    x1: z.number().finite(),
+    y1: z.number().finite(),
+    x2: z.number().finite(),
+    y2: z.number().finite(),
+    stroke: contentColor,
+    strokeWidth: z.number().finite().positive(),
+  }),
+]);
 export const assetSchema = z.object({
   id,
   kind: z.enum(['video', 'image', 'audio', 'doc']),
@@ -18,24 +95,81 @@ export const assetSchema = z.object({
   height: z.number().positive().optional(),
   source: z.enum(['user', 'web']),
   attribution: attributionSchema.optional(),
+  mask: maskMetadataSchema.optional(),
+  lut: lutMetadataSchema.optional(),
 });
 export const effectSchema = z.object({
   id,
   kind: z.string(),
-  params: z.record(z.union([z.string(), z.number(), z.boolean()])),
+  params: z.record(z.union([z.string(), z.number().finite(), z.boolean()])),
+  scope: z.enum(['all', 'inside_mask', 'outside_mask']).optional(),
 });
-export const keyframeSchema = z.object({
-  property: z.string(),
-  time: sec,
-  value: z.number(),
-  easing: z.enum(['linear', 'ease_out', 'ease_in_out']).optional(),
-});
-export const transitionSchema = z.object({
-  kind: z.enum(['cut', 'crossfade', 'dip']),
-  duration: sec,
-});
+export const keyframeSchema = z
+  .object({
+    property: z.string(),
+    time: sec,
+    value: z.number().finite(),
+    easing: z
+      .enum(['linear', 'ease_out', 'ease_in_out', 'hold', 'bezier'])
+      .optional(),
+    bezier: z
+      .tuple([unit, z.number().finite(), unit, z.number().finite()])
+      .optional(),
+  })
+  .superRefine((key, ctx) => {
+    if (key.easing === 'bezier' && !key.bezier)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['bezier'],
+        message: 'Bezier easing requires handles',
+      });
+    if (key.easing !== 'bezier' && key.bezier)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['bezier'],
+        message: 'Handles require bezier easing',
+      });
+  });
+export const transitionSchema = z
+  .object({
+    kind: z.enum(['cut', 'crossfade', 'dip', 'slide', 'zoom_in', 'whip']),
+    duration: sec.optional(),
+    durationFrames: z.number().int().nonnegative().safe().optional(),
+    direction: z.enum(['left', 'right', 'up', 'down']).optional(),
+  })
+  .superRefine((transition, ctx) => {
+    if (
+      transition.duration === undefined &&
+      transition.durationFrames === undefined
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'A transition duration is required',
+      });
+    if (
+      transition.duration !== undefined &&
+      transition.durationFrames !== undefined &&
+      Math.abs(transition.duration - transition.durationFrames / 30) > 1e-6
+    )
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Frame and second durations disagree at project 30 fps',
+      });
+  });
 export const markerSchema = z.object({ id, time: sec, label: z.string() });
-export const textStyleIdSchema = z.enum(['title', 'caption', 'lower_third']);
+export const textStyleIdSchema = z.enum([
+  'title',
+  'caption',
+  'lower_third',
+  'caption-clean',
+  'caption-pop',
+  'caption-box',
+  'title-serif',
+  'title-bold',
+  'lower-third',
+  'label-mono',
+  'quote',
+]);
 export const clipSchema = z.object({
   id,
   trackId: id,
@@ -55,6 +189,7 @@ export const clipSchema = z.object({
   text: z
     .object({
       content: z.string(),
+      secondaryContent: z.string().optional(),
       style: textStyleIdSchema,
       words: z.array(z.object({ t: sec, d: sec, w: z.string() })).optional(),
     })
@@ -64,12 +199,16 @@ export const clipSchema = z.object({
   mask: z
     .object({
       kind: z.literal('sam'),
+      mode: z.enum(['selection', 'cutout']).optional(),
       maskAssetId: id,
       invert: z.boolean(),
       feather: sec,
     })
     .optional(),
-  speed: z.number().positive(),
+  shape: shapeSchema.optional(),
+  animationOffsetSec: sec.optional(),
+  audioRole: z.enum(['voice', 'music', 'other']).optional(),
+  speed: z.number().finite().positive(),
   volume: sec.optional(),
   transitionIn: transitionSchema.optional(),
   transitionOut: transitionSchema.optional(),
@@ -80,6 +219,7 @@ export const trackSchema = z.object({
   kind: z.enum(['video', 'overlay', 'text', 'audio']),
   name: z.string(),
   muted: z.boolean(),
+  solo: z.boolean().optional(),
   hidden: z.boolean(),
   locked: z.boolean(),
   height: z.union([z.literal(48), z.literal(64), z.literal(88)]),
@@ -221,6 +361,10 @@ export const serverEventSchema = z.discriminatedUnion('t', [
     target: z
       .object({
         clipId: id.optional(),
+        time: sec.optional(),
+        previewPolygon: z.array(z.tuple([unit, unit])).optional(),
+        subjectLabel: z.string().optional(),
+        coordinateSpace: z.literal('source_uv').optional(),
         trackId: id.optional(),
         region: z
           .object({
@@ -263,6 +407,9 @@ export const serverEventSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('asset.added'), asset: assetSchema }),
   z.object({
     t: z.literal('sam.mask'),
+    actionId: id.optional(),
+    subjectLabel: z.string().optional(),
+    coordinateSpace: z.literal('source_uv').optional(),
     clipId: id,
     maskAssetId: id,
     previewPolygon: z.array(z.tuple([z.number(), z.number()])),
@@ -290,3 +437,12 @@ export type ClientEvent = z.infer<typeof clientEventSchema>;
 export type Upload = z.infer<typeof uploadSchema>;
 export type SessionSnapshot = z.infer<typeof sessionSnapshotSchema>;
 export type SessionRequest = z.infer<typeof sessionRequestSchema>;
+
+/** Named Phase 6 resource types for pure decoders/adapters. */
+export type MaskMetadata = z.infer<typeof maskMetadataSchema>;
+export type MaskRleFrame = z.infer<typeof maskRleFrameSchema>;
+export type LutMetadata = z.infer<typeof lutMetadataSchema>;
+export type ClipShape = z.infer<typeof shapeSchema>;
+export type Keyframe = z.infer<typeof keyframeSchema>;
+export type Transition = z.infer<typeof transitionSchema>;
+export type TextStyleId = z.infer<typeof textStyleIdSchema>;

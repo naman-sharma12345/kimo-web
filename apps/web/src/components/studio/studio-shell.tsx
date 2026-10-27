@@ -32,6 +32,10 @@ import {
 import { Resizer } from './controls';
 import { StudioStatusBar } from './status-bar';
 import { ShortcutsDialog } from './shortcuts-dialog';
+import {
+  StudioCompositor,
+  type StudioCompositorHandle,
+} from './compositor-bridge';
 import '@/styles/ui.css';
 import '@/styles/studio.css';
 export interface StudioShellProps {
@@ -41,6 +45,8 @@ export interface StudioShellProps {
   /** The parent must supply the authenticated user id when authentication lands. */
   userKey?: string;
   slots?: StudioSlots;
+  /** A custom compositor slot can share this Shell's one socket and authoritative assets. */
+  compositorRef?: React.RefObject<StudioCompositorHandle | null>;
   commands?: Partial<StudioCommands> & {
     keyboard?: (id: string) => boolean | undefined;
   };
@@ -59,6 +65,7 @@ export function StudioShell({
   originalPrompt = '',
   userKey = 'browser-profile',
   slots = emptySlots,
+  compositorRef,
   commands = emptyCommands,
   subscribe = true,
 }: StudioShellProps) {
@@ -79,6 +86,11 @@ export function StudioShell({
   const composer = React.useRef<HTMLTextAreaElement>(null);
   const viewer = React.useRef<HTMLElement>(null);
   const socket = React.useRef<WebSocket | null>(null);
+  const defaultCompositor = React.useRef<StudioCompositorHandle | null>(null);
+  const compositor = compositorRef ?? defaultCompositor;
+  React.useEffect(() => {
+    if (compositorRef) compositorRef.current?.assets(assets);
+  }, [assets, compositorRef]);
   React.useEffect(() => {
     useStudio
       .getState()
@@ -117,6 +129,7 @@ export function StudioShell({
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let handshake: ReturnType<typeof setTimeout> | undefined;
     let connection: WebSocket | undefined;
+    let projectQueue: Promise<void> = Promise.resolve();
     const url = snapshot.wsUrl;
     function retry() {
       clearTimeout(handshake);
@@ -139,6 +152,8 @@ export function StudioShell({
           url,
           (event) => {
             if (disposed) return;
+            if (event.t !== 'asset.added' && event.t !== 'project.ops')
+              compositor.current?.event(event);
             useStudio.getState().receive(event);
             if (event.t === 'asset.added')
               setAssets((current) => [
@@ -148,14 +163,40 @@ export function StudioShell({
             if (event.t === 'project.ops') {
               const current = useProject.getState().project;
               if (current && event.version <= current.version) return;
-              void useProject
-                .getState()
-                .receive(sessionId, event.version, event.ops)
-                .catch(() =>
-                  setBoundary(
-                    'project sync failed; reload this session to restore the authoritative edit.',
-                  ),
-                );
+              compositor.current?.event(event);
+              // Serialize authoritative refetches with contiguous events. A refetch replaces
+              // the asset registry too, and never reapplies the same op batch.
+              projectQueue = projectQueue
+                .then(async () => {
+                  if (disposed) return;
+                  const latest = useProject.getState().project;
+                  if (latest && event.version <= latest.version) return;
+                  if (!latest || event.version !== latest.version + 1) {
+                    const restored = await api.session(sessionId);
+                    if (disposed) return;
+                    if (restored.project.version < event.version)
+                      throw new Error(
+                        'authoritative snapshot is behind the event',
+                      );
+                    const newest = useProject.getState().project;
+                    if (
+                      newest?.id === restored.project.id &&
+                      newest.version > restored.project.version
+                    )
+                      return;
+                    useProject.getState().replace(restored.project);
+                    setAssets(restored.assets);
+                  } else
+                    await useProject
+                      .getState()
+                      .receive(sessionId, event.version, event.ops);
+                })
+                .catch(() => {
+                  if (!disposed)
+                    setBoundary(
+                      'project sync failed; reload this session to restore the authoritative edit.',
+                    );
+                });
             }
           },
           retry,
@@ -183,7 +224,7 @@ export function StudioShell({
       connection?.close();
       socket.current = null;
     };
-  }, [sessionId, snapshot.wsUrl, subscribe]);
+  }, [sessionId, snapshot.wsUrl, subscribe, compositor]);
   const togglePanel = React.useCallback(
     (panel: PanelName) => {
       useStudio.getState().togglePanel(panel);
@@ -205,36 +246,37 @@ export function StudioShell({
       commands.fullscreen();
       return;
     }
-    // Shell-only fullscreen. No fabricated video or frame loop.
     if (
-      document.fullscreenElement === viewer.current &&
-      document.exitFullscreen
+      document.fullscreenElement &&
+      document.fullscreenElement !== viewer.current &&
+      !useStudio.getState().fullscreen
+    )
+      return;
+    if (
+      !Object.keys(project.clips).length ||
+      (slots.viewer && !compositorRef)
     ) {
-      void document
-        .exitFullscreen()
-        .catch(() =>
-          setBoundary(
-            'fullscreen could not close; use your browser fullscreen controls.',
-          ),
-        );
+      if (document.fullscreenElement === viewer.current)
+        void document
+          .exitFullscreen?.()
+          .catch(() => setBoundary('fullscreen could not close.'));
+      else
+        void viewer.current
+          ?.requestFullscreen?.()
+          .catch(() => setBoundary('fullscreen unavailable.'));
       return;
     }
-    if (document.fullscreenElement) return;
-    if (viewer.current?.requestFullscreen)
-      void viewer.current
-        .requestFullscreen()
-        .catch(() =>
-          setBoundary(
-            'fullscreen is unavailable in this browser. live preview connects in Phase 6.',
-          ),
-        );
-    else setBoundary('live preview connects in Phase 6');
-  }, [commands]);
+    useStudio.setState({ fullscreen: !useStudio.getState().fullscreen });
+  }, [commands, project.clips, slots.viewer, compositorRef]);
   React.useEffect(
     () =>
       registerStudioKeyboard((id) => {
         const current = useStudio.getState();
         if (commands.keyboard?.(id) === true) return true;
+        if (id === 'escape' && current.fullscreen) {
+          useStudio.setState({ fullscreen: false });
+          return true;
+        }
         if (id === 'help') {
           setHelp(true);
           return;
@@ -373,7 +415,25 @@ export function StudioShell({
           <ViewerPanel
             project={project}
             assets={assets}
-            slots={slots}
+            slots={{
+              ...slots,
+              viewer:
+                slots.viewer ??
+                (Object.keys(project.clips).length ? (
+                  <StudioCompositor
+                    key={sessionId}
+                    project={project}
+                    assets={assets}
+                    bridgeRef={compositor}
+                    debug={
+                      typeof window !== 'undefined' &&
+                      new URLSearchParams(window.location.search).get(
+                        'debug',
+                      ) === '1'
+                    }
+                  />
+                ) : undefined),
+            }}
             viewerRef={viewer}
           />
           {!state.inspectorCollapsed && (

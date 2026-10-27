@@ -30,7 +30,7 @@ export function timecode(seconds: number, fps = 30): string {
     .map((n) => String(n).padStart(2, '0'))
     .join(':');
 }
-/** Intent state only until Phase 6 consumes it; this component never simulates a compositor. */
+/** Transport intents; the controller owns the clock and throttles playback publications. */
 export function StudioTransport() {
   const state = useStudio();
   return (
@@ -77,6 +77,48 @@ export function StudioTransport() {
         />
       </div>
       <div className="studio-transport-right">
+        <Slider
+          aria-label="preview playhead"
+          min={0}
+          max={Math.max(state.duration, 1 / 30)}
+          step={1 / 30}
+          value={[state.playhead]}
+          onPointerDown={() => state.beginScrubbing()}
+          onValueChange={([value]) => state.updateScrubbing(value ?? 0)}
+          onValueCommit={([value]) => state.endScrubbing(value ?? 0)}
+          onKeyDown={(event) => {
+            if (
+              [
+                'ArrowLeft',
+                'ArrowRight',
+                'Home',
+                'End',
+                'PageUp',
+                'PageDown',
+              ].includes(event.key)
+            )
+              state.beginScrubbing();
+          }}
+          onKeyUp={() => {
+            if (useStudio.getState().scrubbing)
+              state.endScrubbing(useStudio.getState().playhead);
+          }}
+          onPointerCancel={() => state.endScrubbing(state.playhead)}
+          onBlur={() => {
+            if (useStudio.getState().scrubbing)
+              state.endScrubbing(useStudio.getState().playhead);
+          }}
+        />
+        <Button
+          variant="ghost"
+          size="xs"
+          aria-pressed={state.scrubAudioEnabled}
+          onClick={() =>
+            useStudio.setState({ scrubAudioEnabled: !state.scrubAudioEnabled })
+          }
+        >
+          scrub audio
+        </Button>
         <IconButton
           icon={Repeat}
           label="loop"

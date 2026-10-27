@@ -46,6 +46,7 @@ export function applyOps(
             ...structuredClone(c),
             id: op.newId,
             start: op.at,
+            animationOffsetSec: (c.animationOffsetSec ?? 0) + offset,
             in: c.in + offset * c.speed,
             duration: c.duration - offset,
           };

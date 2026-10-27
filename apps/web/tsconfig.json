@@ -9,7 +9,9 @@
     ],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@kimo/client": ["../../packages/kimo-client/src/index.ts"],
+      "@kimo/compositor": ["../../packages/compositor/src/index.ts"]
     },
     "isolatedModules": true
   },

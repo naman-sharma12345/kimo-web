@@ -148,3 +148,57 @@ A manually dispatched GitHub Actions test preview now provides a lifecycle indep
 Server-rendered requests may use the optional internal gateway URL; browsers continue using the public API URL. Four regressions cover that separation. Eight gateway tests cover route/method boundaries, environment isolation, real local synthetic HTTP/WebSocket transport, URL validation and declared/chunked body caps. Full integrated lint, typecheck, **163 tests across 20 files**, and production build passed sequentially with `GATES_EXIT=0` at 2026-10-27 01:38 UTC. A test-double lint issue and the integrated Next ProcessEnv type requirement were corrected before that successful run.
 
 Hosted workflow execution, artifact availability during the active run and the automatic browser flow remain pending. The code and authored workflow are not evidence of a running deployment.
+
+### Phase 5 original-flow follow-up, 2026-10-27 01:45 UTC
+
+The bounded synthetic Actions preview for commit `7008a0a` was reached with the
+managed browser. One observed creation POST returned 200; the original prompt
+advanced automatically through warm-up to its Studio URL by 01:45:27 UTC, without
+forced navigation, reload, request interception or timing changes. The original
+prompt remained visible and Finish was enabled. A later independent synthetic
+REST diagnostic returned `awaiting_review`, 45 recorded action IDs and project
+version 45. The original Studio GET had 14 actions at its earlier point in time;
+these are different observations, not an invented synchronized count.
+
+Limits found: encoded dynamic-route CSS requests returned 404 on this test host,
+so this run does not establish layout acceptance. Five screenshot attempts after
+automatic Studio failed in the managed capture infrastructure; no screenshot is
+claimed or attached for this run. The transient reconnecting label later became
+connected. No hardware, real backend fidelity, cross-browser, accessibility or
+Phase 6 live-preview acceptance is established. The temporary service was still
+in its bounded hold when inspected; final expiration/cleanup is checked separately.
+
+The same preview run subsequently completed successfully at 01:58:33 UTC.
+Its bounded hold and explicit cleanup steps both succeeded at 01:58:26 UTC;
+an independent read of the old public health endpoint at 01:58:39 returned
+Cloudflare HTTP 530/1033 rather than the application. No second preview was
+dispatched and the expired URL is not a deployment link.
+
+## Phase 6 implementation checkpoint, 2026-10-27 02:39 UTC
+
+Implemented the typed pure scene core, paired transitions and split preservation,
+retained Pixi renderer and dual-backend filter sources, bounded media/audio and
+filmstrip runtime, plus the Studio controller/overlays/fullscreen/event bridge.
+Synthetic masks and identity LUTs are generated locally; video text fonts are
+bundled with OFL licenses. No engine repository or extra external runtime library
+was introduced. The compositor now declares its existing internal client package
+as a workspace dependency; the application TypeScript aliases include both local
+packages so production checks resolve the same sources as root checks.
+
+The parent combined sequential gates passed: lint, strict TypeScript, 450 tests in
+35 files, and production build. Production checking initially exposed an overlay
+polygon inference error and missing cross-package resolution; both were corrected
+and the full sequence rerun. A gateway restart interrupted one build, which was
+not counted as success. A later complete build and complete gate sequence exited
+zero. Parent regressions also cover cancellation while fonts are deferred, direct
+resolved sample-time mapping and mask time-origin subtraction.
+
+This is an implementation checkpoint, not full Phase 6 acceptance. GPU shader
+compilation/pixels, browser font/layout, twelve golden images, audible output/A-V
+sync, op-to-pixel latency, seamless cuts, hardware performance and server fidelity
+are unverified. Device-loss restoration is not automatic. Filmstrip workers resize
+and encode decoded bitmaps; they do not demux MP4. SAM data are synthetic and are
+not inference output; existing uncorrelated mock SAM events are not silently
+assigned an action or a person label. See compositor FIDELITY, FIDELITY-RENDERER,
+RENDERER_API and mediaAPI for exact formulas, APIs and limitations. Phases 7–10
+remain unimplemented.

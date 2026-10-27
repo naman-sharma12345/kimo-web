@@ -206,3 +206,220 @@ describe('all contracts', () => {
       expect(s.clientEventSchema.safeParse(event).success).toBe(true);
   });
 });
+
+describe('additive Phase 6 contracts', () => {
+  it('preserves all eight styles and old aliases across snapshots and patches', () => {
+    for (const style of s.textStyleIdSchema.options) {
+      const clip = {
+        ...sampleClip,
+        text: { style, content: 'hello', secondaryContent: 'world' },
+      };
+      expect(s.clipSchema.parse(clip)).toEqual(clip);
+      expect(
+        s.opSchema.parse({
+          op: 'clip.update',
+          id: 'c',
+          patch: { text: clip.text },
+        }),
+      ).toEqual({ op: 'clip.update', id: 'c', patch: { text: clip.text } });
+    }
+  });
+  it('accepts every transition kind and direction, frame-only and legacy seconds', () => {
+    for (const kind of ['cut', 'crossfade', 'dip', 'slide', 'zoom_in', 'whip'])
+      for (const direction of ['left', 'right', 'up', 'down']) {
+        const transition = {
+          kind,
+          direction,
+          duration: 0.5,
+          durationFrames: 15,
+        };
+        expect(s.transitionSchema.parse(transition)).toEqual(transition);
+      }
+    expect(
+      s.transitionSchema.parse({ kind: 'crossfade', duration: 1 }).duration,
+    ).toBe(1);
+    expect(
+      s.transitionSchema.parse({ kind: 'whip', durationFrames: 0 })
+        .durationFrames,
+    ).toBe(0);
+    for (const invalid of [
+      {},
+      { duration: 0.5, durationFrames: 30 },
+      { durationFrames: -1 },
+      { durationFrames: 1.2 },
+    ])
+      expect(
+        s.transitionSchema.safeParse({ kind: 'slide', ...invalid }).success,
+      ).toBe(false);
+  });
+  it('requires finite bezier handles and bounded x, while allowing y overshoot', () => {
+    const key = {
+      property: 'x',
+      time: 0,
+      value: 1,
+      easing: 'bezier',
+      bezier: [0.2, -0.5, 0.8, 1.5],
+    };
+    expect(s.keyframeSchema.parse(key)).toEqual(key);
+    expect(
+      s.keyframeSchema.parse({ ...key, easing: 'hold', bezier: undefined })
+        .easing,
+    ).toBe('hold');
+    for (const bezier of [
+      undefined,
+      [-0.1, 0, 1, 1],
+      [0, 0, 1.1, 1],
+      [0, Infinity, 1, 1],
+      [0, 1],
+    ])
+      expect(s.keyframeSchema.safeParse({ ...key, bezier }).success).toBe(
+        false,
+      );
+    expect(
+      s.keyframeSchema.safeParse({ ...key, easing: 'linear' }).success,
+    ).toBe(false);
+  });
+  it('validates explicit bounded shape payloads without requiring legacy shape geometry', () => {
+    const rect = {
+      kind: 'rect',
+      width: 400,
+      height: 40,
+      radius: 8,
+      fill: [0, 0, 0, 0.7],
+    };
+    const line = {
+      kind: 'line',
+      x1: -10,
+      y1: 0,
+      x2: 10,
+      y2: 20,
+      stroke: [1, 1, 1, 1],
+      strokeWidth: 2,
+    };
+    for (const shape of [rect, line])
+      expect(s.shapeSchema.parse(shape)).toEqual(shape);
+    expect(
+      s.clipSchema.safeParse({ ...sampleClip, kind: 'shape' }).success,
+    ).toBe(true);
+    expect(
+      s.shapeSchema.safeParse({ ...rect, fill: [2, 0, 0, 1] }).success,
+    ).toBe(false);
+    expect(s.shapeSchema.safeParse({ ...line, strokeWidth: 0 }).success).toBe(
+      false,
+    );
+  });
+  it('types mask encodings, exact RLE coverage and LUT atlas metadata', () => {
+    const base = {
+      width: 2,
+      height: 2,
+      coordinateSpace: 'source_uv',
+      channel: 'luma',
+    };
+    for (const metadata of [
+      { ...base, encoding: 'rle', fps: 30, version: 1, payloadUrl: '/runs' },
+      { ...base, encoding: 'video', fps: 24, timeOrigin: 2 },
+      { ...base, encoding: 'luma_image' },
+    ])
+      expect(s.maskMetadataSchema.parse(metadata)).toEqual(metadata);
+    const frame = { frameIndex: 0, width: 2, height: 2, counts: [0, 2, 2] };
+    expect(s.maskRleFrameSchema.parse(frame)).toEqual(frame);
+    for (const counts of [[1], [2, 3], [-1, 5], [1.5, 2.5], []])
+      expect(s.maskRleFrameSchema.safeParse({ ...frame, counts }).success).toBe(
+        false,
+      );
+    expect(
+      s.maskMetadataSchema.safeParse({ ...base, encoding: 'rle', fps: 0 })
+        .success,
+    ).toBe(false);
+    expect(
+      s.lutMetadataSchema.parse({
+        size: 64,
+        layout: 'tiles_8x8',
+        colorSpace: 'srgb',
+      }).size,
+    ).toBe(64);
+    expect(
+      s.lutMetadataSchema.safeParse({
+        size: 32,
+        layout: 'strip',
+        colorSpace: 'srgb',
+      }).success,
+    ).toBe(false);
+  });
+  it('preserves mask/LUT metadata in asset events and scoped effects in ops', () => {
+    const asset = {
+      id: 'mask',
+      kind: 'image',
+      name: 'mask',
+      url: '/mask',
+      source: 'user',
+      mask: {
+        encoding: 'luma_image',
+        width: 2,
+        height: 2,
+        coordinateSpace: 'source_uv',
+        channel: 'red',
+      },
+      lut: { size: 64, layout: 'tiles_8x8', colorSpace: 'srgb' },
+    };
+    expect(s.serverEventSchema.parse({ t: 'asset.added', asset })).toEqual({
+      t: 'asset.added',
+      asset,
+    });
+    for (const scope of ['all', 'inside_mask', 'outside_mask']) {
+      const op = {
+        op: 'effect.set',
+        clipId: 'c',
+        effect: { id: 'e', kind: 'blur', params: { sigma: 3 }, scope },
+      };
+      expect(s.opSchema.parse(op)).toEqual(op);
+    }
+  });
+  it('retains optional action target timing and explicit SAM correlation without changing action IDs', () => {
+    const target = {
+      clipId: 'c',
+      time: 2,
+      previewPolygon: [
+        [0, 0],
+        [1, 1],
+      ],
+      subjectLabel: 'person',
+      coordinateSpace: 'source_uv',
+    };
+    const event = {
+      t: 'agent.action.start',
+      id: 'same-phase5-id',
+      tool: 'sam',
+      title: 'mask',
+      args: {},
+      target,
+    };
+    expect(s.serverEventSchema.parse(event)).toEqual(event);
+    const mask = {
+      t: 'sam.mask',
+      actionId: event.id,
+      subjectLabel: 'person',
+      coordinateSpace: 'source_uv',
+      clipId: 'c',
+      maskAssetId: 'm',
+      previewPolygon: target.previewPolygon,
+    };
+    expect(s.serverEventSchema.parse(mask)).toEqual(mask);
+    expect(
+      s.serverEventSchema.safeParse({ ...event, target: { time: -1 } }).success,
+    ).toBe(false);
+  });
+  it('keeps role/solo/animation defaults optional and validates their patches', () => {
+    expect(s.clipSchema.parse(sampleClip).animationOffsetSec).toBeUndefined();
+    for (const role of ['voice', 'music', 'other']) {
+      const op = {
+        op: 'clip.update',
+        id: 'c',
+        patch: { audioRole: role, animationOffsetSec: 2 },
+      };
+      expect(s.opSchema.parse(op)).toEqual(op);
+    }
+    const op = { op: 'track.update', id: 'v', patch: { solo: true } };
+    expect(s.opSchema.parse(op)).toEqual(op);
+  });
+});

@@ -1,0 +1,214 @@
+.host {
+  --preview-in: 120ms;
+  --preview-out: 600ms;
+  --preview-mask-fade: 300ms;
+  --preview-bracket: 12px;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: var(--space-8);
+  overflow: hidden;
+  background: var(--ink-0);
+}
+.surface {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+.overlay path,
+.overlay line,
+.overlay rect,
+.overlay polygon {
+  vector-effect: non-scaling-stroke;
+}
+.guides {
+  fill: none;
+  stroke: var(--cream-16);
+  stroke-width: 1;
+}
+.ai {
+  color: var(--orange);
+  animation: enter var(--preview-in) var(--ease-out) both;
+  transition: opacity var(--preview-out) var(--ease-out);
+}
+.ai[data-ended='true'] {
+  opacity: 0;
+}
+.brackets {
+  fill: none;
+  stroke: var(--orange);
+  stroke-width: 1;
+  stroke-linejoin: round;
+}
+.polygon {
+  fill: var(--orange-24);
+  stroke: var(--orange);
+  stroke-width: 1;
+  transition: opacity var(--preview-mask-fade) var(--ease-out);
+}
+.maskLabel {
+  display: inline-block;
+  color: var(--cream-100);
+  background: var(--ink-1);
+  border-radius: var(--r-4);
+  font: var(--weight-11) var(--t-11)/var(--leading-11) var(--font-sans);
+  padding: var(--space-4);
+}
+.textBounds {
+  fill: none;
+  stroke: var(--cream-60);
+  stroke-width: 1;
+  pointer-events: auto;
+}
+.handle {
+  fill: var(--cream-100);
+  stroke: none;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.handle:focus-visible {
+  stroke: var(--cream-100);
+  stroke-width: 4;
+}
+.approx {
+  position: absolute;
+  top: var(--space-8);
+  right: var(--space-8);
+  border-radius: var(--r-4);
+  padding: var(--space-4) var(--space-8);
+  background: var(--ink-2);
+  color: var(--cream-100);
+  font-size: var(--t-11);
+}
+.editAt {
+  position: absolute;
+  bottom: var(--space-8);
+  left: var(--space-8);
+  background: var(--ink-2);
+  color: var(--cream-100);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  padding: var(--space-4) var(--space-8);
+  font-size: var(--t-11);
+}
+.debug {
+  position: absolute;
+  left: var(--space-8);
+  top: var(--space-8);
+  max-width: 80%;
+  white-space: pre-wrap;
+  font: var(--t-11)/var(--leading-11) var(--font-mono);
+  color: var(--cream-60);
+  background: var(--ink-1);
+  pointer-events: none;
+}
+.fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  z-index: 100;
+  background: var(--ink-0);
+}
+.fullControls {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-16);
+  padding: var(--space-16);
+  background: var(--ink-0);
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out);
+  pointer-events: none;
+}
+.fullControls[data-visible='true'],
+.fullControls:has(:focus-visible) {
+  opacity: 1;
+  pointer-events: auto;
+}
+.fullControls button {
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  color: var(--cream-100);
+  border-radius: var(--r-4);
+  padding: var(--space-8);
+}
+.fullControls button:focus-visible,
+.editAt:focus-visible,
+.scrub input:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.scrub {
+  flex: 1;
+}
+.scrub input {
+  display: block;
+  width: 100%;
+  height: 4px;
+  accent-color: var(--cream-60);
+}
+.scrub:hover input,
+.scrub:focus-within input {
+  height: 8px;
+}
+@keyframes enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai {
+    animation: enter var(--dur-2) linear both;
+  }
+  .ai,
+  .polygon,
+  .fullControls {
+    transition: opacity var(--dur-2) linear;
+  }
+}
+
+.polygon[data-edge-ready='true'] {
+  opacity: 0;
+}
+.maskEdge {
+  fill: none;
+  stroke: var(--orange);
+  stroke-width: 1;
+  animation: enter var(--preview-mask-fade) var(--ease-out) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .maskEdge {
+    animation-duration: var(--dur-2);
+  }
+}
+
+.wordBounds {
+  pointer-events: none;
+  stroke-dasharray: 4 4;
+}
+.textBounds > rect[role='button']:focus-visible {
+  outline: none;
+  stroke: var(--cream-100);
+  stroke-width: 2;
+}

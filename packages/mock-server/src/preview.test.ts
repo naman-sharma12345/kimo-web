@@ -12,6 +12,27 @@ import {
 } from './preview';
 
 describe('disposable preview boundary', () => {
+  it('serves encoded Next route assets without permitting other escapes or traversal', () => {
+    expect(
+      route('/_next/static/css/app/studio/%5BsessionId%5D/page.css?v=42'),
+    ).toEqual({
+      mock: false,
+      path: '/_next/static/css/app/studio/[sessionId]/page.css?v=42',
+      port: 3106,
+    });
+    expect(
+      route('/_next/static/chunks/app/warmup/%5bsessionId%5d/page.js')?.path,
+    ).toBe('/_next/static/chunks/app/warmup/[sessionId]/page.js');
+    expect(route('/icon.svg?version=1')?.path).toBe('/icon.svg?version=1');
+    for (const path of [
+      '/_next/static/%2e%2e/.env',
+      '/_next/static/css/%2fetc/passwd',
+      '/_next/static/css/%255BsessionId%255D/page.css',
+      '/_next/static/css/[id]/../.env',
+      '/studio/%5BsessionId%5D',
+    ])
+      expect(route(path)).toBeNull();
+  });
   it('allows only frontend pages and required public assets', () => {
     for (const path of [
       '/',

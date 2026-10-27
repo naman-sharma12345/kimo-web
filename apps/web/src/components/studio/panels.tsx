@@ -189,9 +189,9 @@ export function ViewerPanel({
   viewerRef: React.RefObject<HTMLElement | null>;
 }) {
   const hasOps = useStudio((s) => s.hasOps);
-  const [zoom, setZoom] = React.useState('fit');
-  const [guides, setGuides] = React.useState(false);
-  const [overlays, setOverlays] = React.useState(true);
+  const zoom = useStudio((s) => s.viewerZoom);
+  const guides = useStudio((s) => s.guides);
+  const overlays = useStudio((s) => s.overlays);
   const thumbnail = assets.find(
     (asset) =>
       asset.source === 'user' && (asset.thumbUrl || asset.kind === 'image'),
@@ -218,7 +218,9 @@ export function ViewerPanel({
         <span className="studio-flex" />
         <Segmented
           value={zoom}
-          onValueChange={setZoom}
+          onValueChange={(value) =>
+            useStudio.setState({ viewerZoom: value as 'fit' | '50%' | '100%' })
+          }
           aria-label="viewer zoom"
         >
           {['fit', '50%', '100%'].map((value) => (
@@ -231,13 +233,13 @@ export function ViewerPanel({
           icon={Grid3x3}
           label="safe-area/thirds guides"
           aria-pressed={guides}
-          onClick={() => setGuides(!guides)}
+          onClick={() => useStudio.setState({ guides: !guides })}
         />
         <IconButton
           icon={ScanEye}
           label="show AI overlays"
           aria-pressed={overlays}
-          onClick={() => setOverlays(!overlays)}
+          onClick={() => useStudio.setState({ overlays: !overlays })}
         />
       </div>
       <div className="studio-viewer-frame-area">
