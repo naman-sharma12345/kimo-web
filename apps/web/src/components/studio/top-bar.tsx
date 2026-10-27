@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/dialog';
 import { BrandMark } from '@/components/landing/brand';
 import { useStudio } from '@/stores/studio';
+import type { SaveStatus } from '@/lib/editing/types';
 import { IconButton } from './controls';
 export interface StudioCommands {
   pauseAgent: () => void;
@@ -34,11 +35,13 @@ export function StudioTopBar({
   commands,
   togglePanel,
   onLeave,
+  projectSave,
 }: {
   sessionId: string;
   commands: StudioCommands;
   togglePanel: (panel: 'agent' | 'inspector') => void;
   onLeave: () => void;
+  projectSave?: SaveStatus;
 }) {
   const state = useStudio();
   const [title, setTitle] = React.useState('untitled video');
@@ -46,7 +49,10 @@ export function StudioTopBar({
   const [editing, setEditing] = React.useState(false);
   const [leave, setLeave] = React.useState(false);
   const [save, setSave] = React.useState<
-    'saved' | 'saving…' | 'offline · changes kept locally'
+    | 'saved'
+    | 'saving…'
+    | 'offline · changes kept locally'
+    | 'unsaved · browser storage unavailable'
   >('saved');
   React.useEffect(() => {
     try {
@@ -74,9 +80,23 @@ export function StudioTopBar({
       localStorage.setItem(`kimo-studio-title:v1:${sessionId}`, value);
       setSave(navigator.onLine ? 'saved' : 'offline · changes kept locally');
     } catch {
-      setSave('offline · changes kept locally');
+      setSave('unsaved · browser storage unavailable');
     }
   }
+  const projectSaveLabel =
+    projectSave && projectSave !== 'saved'
+      ? (
+          {
+            draft: 'editing…',
+            pending: 'saving…',
+            offline: 'offline · changes kept locally',
+            unknown: 'save status unknown',
+            unsaved: 'unsaved · browser storage unavailable',
+            disposed: 'not connected',
+          } as const
+        )[projectSave]
+      : undefined;
+  const saveLabel = projectSaveLabel ?? save;
   const label = {
     acting: 'kimo is editing',
     thinking: 'kimo is thinking',
@@ -136,10 +156,10 @@ export function StudioTopBar({
           )}
           <span
             className="studio-save"
-            data-offline={save.startsWith('offline') || undefined}
+            data-offline={saveLabel.startsWith('offline') || undefined}
             title="project title saved on this device; project ops use the session API"
           >
-            {save}
+            {saveLabel}
           </span>
         </div>
         <div className="studio-top-center">

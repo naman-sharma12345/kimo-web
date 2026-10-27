@@ -10,6 +10,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { KimoProject, SessionSnapshot, ServerEvent } from '@kimo/client';
 import { useStudio } from '@/stores/studio';
 import { useProject } from '@/stores/project';
+import { useEditing } from '@/stores/editing';
+import { withBuiltinAssets } from './builtin-assets';
 import {
   StudioCompositor,
   type StudioCompositorHandle,
@@ -17,7 +19,7 @@ import {
 import { StudioShell } from './studio-shell';
 const mocks = vi.hoisted(() => ({
   created: vi.fn(),
-  init: vi.fn(async () => undefined),
+  init: vi.fn(async (): Promise<void> => undefined),
   dispose: vi.fn(),
   event: vi.fn(),
   assets: vi.fn(),
@@ -27,6 +29,16 @@ const mocks = vi.hoisted(() => ({
   session: vi.fn(),
   connect: vi.fn(),
   close: vi.fn(),
+  playback: undefined as
+    ((time: number, playing: boolean, fps: number | null) => void) | undefined,
+  audioLevel: vi.fn(() => ({
+    available: true,
+    state: 'measuring' as const,
+    peak: 0.5,
+    rms: 0.25,
+    peakDb: -6.02,
+    rmsDb: -12.04,
+  })),
   socketReceive: undefined as ((event: ServerEvent) => void) | undefined,
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -44,8 +56,11 @@ vi.mock('@kimo/compositor', () => ({
   },
   measureTextOverlay: vi.fn(async () => undefined),
   CompositorController: class {
-    constructor() {
+    constructor(options: {
+      onPlayback?: (time: number, playing: boolean, fps: number | null) => void;
+    }) {
       mocks.created();
+      mocks.playback = options.onPlayback;
     }
     init = mocks.init;
     dispose = mocks.dispose;
@@ -57,6 +72,7 @@ vi.mock('@kimo/compositor', () => ({
     getResource = () => undefined;
     getFilmstrip = vi.fn();
     getWaveform = vi.fn();
+    getAudioLevel = mocks.audioLevel;
   },
 }));
 const project: KimoProject = {
@@ -91,6 +107,10 @@ const snapshot: SessionSnapshot = {
   wsUrl: 'ws://one-socket',
 };
 beforeEach(() => {
+  // These integration tests exercise state/lifecycle only, never canvas pixels or GPU acceptance.
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+    () => null,
+  );
   vi.clearAllMocks();
   useStudio.getState().resetSession('s', 10, true, false);
   useProject.getState().replace(project);
@@ -205,13 +225,12 @@ describe('Studio compositor adapter lifecycle', () => {
     act(() => mocks.socketReceive?.({ t: 'asset.added', asset }));
     expect(mocks.event).toHaveBeenCalledTimes(2);
     expect(mocks.assets).toHaveBeenCalledTimes(before + 1);
-    expect(mocks.assets).toHaveBeenLastCalledWith([asset]);
+    expect(mocks.assets).toHaveBeenLastCalledWith(withBuiltinAssets([asset]));
   });
 });
 
 describe('Authoritative snapshot bridge', () => {
   it('serializes a contiguous op then refetches project and assets on a gap, without replaying ops twice', async () => {
-    const receive = vi.spyOn(useProject.getState(), 'receive');
     const asset = {
       id: 'new',
       name: 'authoritative image',
@@ -226,6 +245,9 @@ describe('Authoritative snapshot bridge', () => {
     });
     const view = render(<StudioShell sessionId="s" snapshot={snapshot} />);
     await waitFor(() => expect(mocks.init).toHaveBeenCalledTimes(1));
+    const editing = useEditing.getState().session;
+    if (!editing) throw new Error('editing authority not attached');
+    const receive = vi.spyOn(editing, 'receiveAuthoritative');
     act(() => mocks.socketReceive?.({ t: 'project.ops', version: 2, ops: [] }));
     await waitFor(() => expect(useProject.getState().project?.version).toBe(2));
     expect(receive).toHaveBeenCalledTimes(1);
@@ -233,7 +255,7 @@ describe('Authoritative snapshot bridge', () => {
     await waitFor(() => expect(useProject.getState().project?.version).toBe(5));
     expect(mocks.session).toHaveBeenCalledTimes(1);
     expect(receive).toHaveBeenCalledTimes(1);
-    expect(mocks.assets).toHaveBeenLastCalledWith([asset]);
+    expect(mocks.assets).toHaveBeenLastCalledWith(withBuiltinAssets([asset]));
     act(() => mocks.socketReceive?.({ t: 'project.ops', version: 5, ops: [] }));
     expect(receive).toHaveBeenCalledTimes(1);
     view.unmount();
@@ -297,5 +319,142 @@ describe('Custom viewer slot bridge', () => {
     await waitFor(() => expect(assets).toHaveBeenCalledTimes(calls + 1));
     expect(assets).toHaveBeenLastCalledWith([image]);
     expect(mocks.connect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Fatal GPU preview recovery UI (mocked initialization only)', () => {
+  it('shows nested causes accessibly, hides inactive canvas, and blocks playback but preserves seek/edit controls', async () => {
+    mocks.init.mockRejectedValueOnce(
+      new AggregateError(
+        [
+          new Error('No available renderer for the current environment'),
+          new Error('WebGL fallback unavailable', {
+            cause: new Error('backend unavailable'),
+          }),
+        ],
+        'WebGPU/WebGL preview initialization failed',
+      ),
+    );
+    render(
+      <StudioShell
+        sessionId="s"
+        snapshot={{ ...snapshot, status: 'awaiting_review', actionIds: ['a'] }}
+      />,
+    );
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Preview unavailable');
+    expect(alert).toHaveTextContent('No available renderer');
+    expect(alert).toHaveTextContent('WebGL fallback unavailable');
+    expect(alert).toHaveTextContent('backend unavailable');
+    expect(alert).toHaveTextContent('GPU-capable browser');
+    expect(screen.getByTestId('preview-fallback')).toBe(alert);
+    expect(screen.getByTestId('compositor')).toHaveAttribute(
+      'data-preview-ready',
+      'false',
+    );
+    expect(screen.getByTestId('compositor')).toHaveAttribute(
+      'data-preview-status',
+      'unavailable',
+    );
+    expect(screen.queryByText('preview approx.')).not.toBeInTheDocument();
+    expect(screen.getByTestId('compositor')).toHaveAttribute(
+      'data-preparing',
+      'false',
+    );
+    expect(
+      screen.getByTestId('compositor-canvas').parentElement,
+    ).toHaveAttribute('hidden');
+    expect(screen.getByRole('button', { name: 'play preview' })).toBeDisabled();
+    for (const key of [' ', 'j', 'l', 'k']) fireEvent.keyDown(window, { key });
+    expect(useStudio.getState()).toMatchObject({
+      previewStatus: 'unavailable',
+      playing: false,
+      shuttle: 0,
+    });
+    fireEvent.keyDown(window, { key: 'ArrowRight', shiftKey: true });
+    expect(useStudio.getState().playhead).toBe(1);
+    expect(screen.getByRole('button', { name: /finish/i })).toBeEnabled();
+    act(() => useStudio.setState({ fullscreen: true }));
+    expect(
+      screen
+        .getAllByRole('button', { name: 'play preview' })
+        .every((button) => button.hasAttribute('disabled')),
+    ).toBe(true);
+    expect(screen.getByRole('button', { name: 'close preview' })).toBeEnabled();
+  });
+  it('stays initializing until init resolves and does not become ready after an abandoned mount', async () => {
+    let resolve!: () => void;
+    mocks.init.mockImplementationOnce(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done;
+        }),
+    );
+    const bridgeRef = React.createRef<StudioCompositorHandle>();
+    const view = render(
+      <StudioCompositor project={project} assets={[]} bridgeRef={bridgeRef} />,
+    );
+    await waitFor(() => expect(mocks.init).toHaveBeenCalledTimes(1));
+    expect(useStudio.getState().previewStatus).toBe('initializing');
+    act(() => useStudio.getState().requestPlayback(true));
+    expect(useStudio.getState().playing).toBe(false);
+    view.unmount();
+    await act(async () => resolve());
+    expect(useStudio.getState().previewStatus).toBe('legacy');
+  });
+  it('preserves ready state on a same-session snapshot refresh without reinitializing the renderer', async () => {
+    const view = render(<StudioShell sessionId="s" snapshot={snapshot} />);
+    await waitFor(() =>
+      expect(useStudio.getState().previewStatus).toBe('ready'),
+    );
+    view.rerender(
+      <StudioShell
+        sessionId="s"
+        snapshot={{ ...snapshot, status: 'awaiting_review' }}
+      />,
+    );
+    expect(useStudio.getState().previewStatus).toBe('ready');
+    expect(mocks.init).toHaveBeenCalledTimes(1);
+  });
+  it('becomes ready only after successful initialization and resets fatal status for a new session', async () => {
+    useStudio.getState().setPreviewStatus('error');
+    const bridgeRef = React.createRef<StudioCompositorHandle>();
+    render(
+      <StudioCompositor project={project} assets={[]} bridgeRef={bridgeRef} />,
+    );
+    await waitFor(() =>
+      expect(useStudio.getState().previewStatus).toBe('ready'),
+    );
+    expect(screen.queryByTestId('preview-fallback')).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId('compositor-canvas').parentElement,
+    ).not.toHaveAttribute('hidden');
+    act(() => useStudio.getState().requestPlayback(true));
+    expect(useStudio.getState().playing).toBe(true);
+  });
+});
+
+describe('actual-output seam (mocked controller, no audio or GPU acceptance)', () => {
+  it('reuses controller playback publications for meter subscribers and releases subscription without a second controller', async () => {
+    const ref = React.createRef<StudioCompositorHandle>();
+    const view = render(
+      <StudioCompositor project={project} assets={[]} bridgeRef={ref} />,
+    );
+    await waitFor(() => expect(mocks.init).toHaveBeenCalledTimes(1));
+    expect(ref.current?.getAudioLevel?.()).toMatchObject({
+      peak: 0.5,
+      rms: 0.25,
+      state: 'measuring',
+    });
+    const sample = vi.fn();
+    const stop = ref.current?.subscribeAudioLevel?.(sample);
+    act(() => mocks.playback?.(1, true, 30));
+    expect(sample).toHaveBeenCalledTimes(1);
+    stop?.();
+    act(() => mocks.playback?.(2, true, 30));
+    expect(sample).toHaveBeenCalledTimes(1);
+    expect(mocks.created).toHaveBeenCalledTimes(1);
+    view.unmount();
+    expect(ref.current).toBeNull();
   });
 });

@@ -212,3 +212,47 @@
   stroke: var(--cream-100);
   stroke-width: 2;
 }
+
+.surface[hidden] {
+  display: none;
+}
+.fallback {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: var(--space-16);
+  color: var(--cream-100);
+  background: var(--ink-1);
+  overflow-wrap: anywhere;
+}
+.fallback pre {
+  white-space: pre-wrap;
+  font-size: var(--t-11);
+}
+.fullControls {
+  box-sizing: border-box;
+  flex-wrap: wrap;
+}
+.scrub {
+  min-width: 0;
+}
+.fullControls button:disabled {
+  opacity: 0.5;
+}
+
+.fullscreen .fallback {
+  padding-bottom: calc(var(--space-16) * 6);
+}
+
+.textLayoutStatus {
+  position: absolute;
+  left: var(--space-12);
+  top: var(--space-12);
+  color: var(--cream-60);
+  background: var(--ink-1);
+  padding: var(--space-8);
+  font: var(--t-12) / var(--leading-12) var(--font-sans);
+  pointer-events: none;
+}

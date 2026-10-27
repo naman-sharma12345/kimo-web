@@ -435,3 +435,194 @@ describe('AudioEngine actual graph operations through injected WebAudio boundary
     engine.dispose();
   });
 });
+
+describe('Phase 7 actual output meter and audio proposals', () => {
+  it.each([
+    [0, 0, 0, null],
+    [0.25, 0.25, 0.25, -12.041199826559248],
+    [0.75, 0.75, 0.75, -2.4987747321659985],
+    [1, 1, 1, 0],
+    [1.25, 1.25, 1.25, 1.9382002601611283],
+  ])(
+    'samples real injected Float32 time-domain data at amplitude %s',
+    (amplitude, peak, rms, db) => {
+      const context = new Context();
+      const analyser = {
+        fftSize: 2048,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        getFloatTimeDomainData: vi.fn((samples: Float32Array) =>
+          samples.fill(amplitude),
+        ),
+      };
+      const createAnalyser = vi.fn(() => analyser);
+      Object.assign(context, { createAnalyser });
+      const engine = new AudioEngine({ context: context.context });
+      expect(engine.getLevels()).toMatchObject({
+        available: false,
+        state: 'unavailable',
+        peak: 0,
+        rms: 0,
+      });
+      expect(createAnalyser).not.toHaveBeenCalled();
+      engine.setBuffer('asset', buffer());
+      engine.sync([clip({ volume: 0.2, audioRole: 'music' })], tracks, 0, {
+        playing: true,
+        master: 0.3,
+      });
+      expect(context.gains[0]?.connect).toHaveBeenCalledWith(analyser);
+      expect(analyser.connect).toHaveBeenCalledWith(context.destination);
+      expect(engine.getLevels()).toEqual({
+        available: true,
+        state: 'measuring',
+        peak,
+        rms,
+        peakDb: db,
+        rmsDb: db,
+      });
+      // Fixture samples represent analyser output; gains must NOT be multiplied again.
+      const reads = analyser.getFloatTimeDomainData.mock.calls.length;
+      engine.pause();
+      expect(engine.getLevels()).toMatchObject({
+        available: true,
+        state: 'paused',
+        peak: 0,
+        rms: 0,
+        peakDb: null,
+      });
+      expect(analyser.getFloatTimeDomainData).toHaveBeenCalledTimes(reads);
+      engine.dispose();
+      expect(engine.getLevels()).toMatchObject({
+        available: false,
+        state: 'disposed',
+        peak: 0,
+        rms: 0,
+      });
+      expect(analyser.disconnect).toHaveBeenCalledOnce();
+      expect(createAnalyser).toHaveBeenCalledOnce();
+    },
+  );
+  it('computes RMS separately, handles suspended contexts and nonfinite samples without stale bars', () => {
+    const context = new Context();
+    const analyser = {
+      fftSize: 2048,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      getFloatTimeDomainData: vi.fn((samples: Float32Array) => {
+        samples.fill(0);
+        samples[0] = 1;
+        samples[1] = -1;
+        samples[2] = NaN;
+      }),
+    };
+    Object.assign(context, { createAnalyser: () => analyser });
+    const engine = new AudioEngine({ context: context.context });
+    engine.setBuffer('asset', buffer());
+    engine.sync([clip()], tracks, 0, { playing: true });
+    expect(engine.getLevels().rms).toBeCloseTo(Math.sqrt(2 / 2048), 12);
+    context.state = 'suspended';
+    expect(engine.getLevels()).toMatchObject({
+      state: 'suspended',
+      peak: 0,
+      rms: 0,
+    });
+    engine.dispose();
+  });
+  it('does not invent a meter when the existing context has no analyser', () => {
+    const { engine, context } = setup();
+    engine.sync([clip()], tracks, 0, { playing: true });
+    expect(engine.getLevels()).toMatchObject({
+      available: false,
+      state: 'unavailable',
+      peak: 0,
+    });
+    expect(context.gains[0]?.connect).toHaveBeenCalledWith(context.destination);
+    engine.dispose();
+  });
+  it('multiplies clip-local fades by split-clock keyed volume and continuously disables ducking', () => {
+    const c = clip({
+      audioRole: 'music',
+      fadeInSec: 2,
+      fadeOutSec: 2,
+      animationOffsetSec: 1,
+      keyframes: [
+        { property: 'volume', time: 0, value: 0 },
+        { property: 'volume', time: 2, value: 1 },
+      ],
+    });
+    expect(volumeAt(c, 0)).toBe(0);
+    expect(volumeAt(c, 1)).toBe(0.5);
+    expect(volumeAt(c, 9)).toBe(0.5);
+    expect(volumeAt(c, 10)).toBe(0);
+    const { engine, context } = setup();
+    const voice = clip({ id: 'voice', audioRole: 'voice' });
+    engine.sync([c, voice], tracks, 1, { playing: true });
+    context.currentTime = 0.15;
+    engine.sync([{ ...c, duckUnderVoice: false }, voice], tracks, 1.15, {
+      playing: true,
+    });
+    expect(context.gains[2]?.gain.calls).toContainEqual({
+      type: 'set',
+      value: 1 + (DUCK_GAIN - 1) * 0.5,
+      time: 0.15,
+    });
+    expect(context.gains[2]?.gain.calls.at(-1)).toEqual({
+      type: 'ramp',
+      value: 1,
+      time: 0.44999999999999996,
+    });
+    engine.dispose();
+  });
+  it.each(['hold', 'bezier'] as const)(
+    'schedules %s plus fades using the shared scalar without smearing hold jumps',
+    (easing) => {
+      const c = clip({
+        fadeInSec: 2,
+        keyframes: [
+          {
+            property: 'volume',
+            time: 0,
+            value: 0.25,
+            easing,
+            bezier: [0.42, 0, 0.58, 1],
+          },
+          { property: 'volume', time: 1, value: 1 },
+        ],
+      });
+      const { engine, context } = setup();
+      engine.sync([c], tracks, 0, { playing: true });
+      const curve = context.gains[1]?.gain.curves[0];
+      expect(curve?.duration).toBe(1);
+      expect(curve?.values[64]).toBeCloseTo(volumeAt(c, 0.5), 6);
+      if (easing === 'hold') {
+        expect(curve?.values[128]).toBeCloseTo(0.125, 6);
+        expect(context.gains[1]?.gain.calls).toContainEqual({
+          type: 'set',
+          value: 0.5,
+          time: 1,
+        });
+      }
+      engine.dispose();
+    },
+  );
+  it('applies native video keepPitch and reports buffered keepPitch as unsupported', () => {
+    const { engine, issues } = setup();
+    engine.sync([clip({ keepPitch: true, speed: 2 })], tracks, 0, {
+      playing: true,
+    });
+    expect(issues.join()).toContain(
+      'Pitch-preserving buffered audio is unavailable',
+    );
+    engine.pause();
+    const element = document.createElement('video');
+    engine.sync(
+      [clip({ kind: 'video', keepPitch: true, speed: 2 })],
+      tracks,
+      0,
+      { playing: true },
+      new Map([['clip', element]]),
+    );
+    expect(element.preservesPitch).toBe(true);
+    engine.dispose();
+  });
+});

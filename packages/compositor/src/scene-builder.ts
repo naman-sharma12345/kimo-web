@@ -201,6 +201,11 @@ function resolveLayer(
     if (clip.text)
       layer.text = resolveText(clip.text, q, project.width, project.height);
     else warn('Text payload unavailable');
+    if (clip.text?.animation === 'fade' || clip.text?.animation === 'rise') {
+      const progress = clamp(q / 0.2);
+      layer.opacity *= progress;
+      if (clip.text.animation === 'rise') transform.y += (1 - progress) * 24;
+    }
   }
   if (clip.mask) {
     const metadata = options.assets?.[clip.mask.maskAssetId]?.mask;
@@ -227,6 +232,7 @@ function resolveLayer(
       );
   }
   for (const effect of clip.effects) {
+    if (effect.enabled === false) continue;
     const params = { ...effect.params };
     for (const [param, value] of Object.entries(params))
       if (typeof value === 'number')
@@ -594,6 +600,7 @@ export function buildScene(
     width: project.width,
     height: project.height,
     fps: project.fps,
+    background: project.background ? [...project.background] : [0, 0, 0, 1],
     layers: [],
     transitionPairs: [],
     audio: [],
@@ -601,7 +608,7 @@ export function buildScene(
   };
   const clips = Object.values(project.clips);
   const tracks = new Map(project.tracks.map((track) => [track.id, track]));
-  const hasSolo = project.tracks.some((track) => track.solo);
+  const hasSolo = project.tracks.some((track) => track.solo && !track.muted);
   const audible = (clip: Clip) => {
     const track = tracks.get(clip.trackId);
     return !!track && !track.muted && (!hasSolo || !!track.solo);
@@ -674,7 +681,8 @@ export function buildScene(
       if (active(clip, t) && (clip.kind === 'video' || clip.kind === 'audio')) {
         const role = clip.audioRole ?? 'other';
         const muted = !audible(clip);
-        const duckGain = role === 'music' ? duck : 1;
+        const duckGain =
+          role === 'music' && clip.duckUnderVoice !== false ? duck : 1;
         const audio: ResolvedAudio = {
           clipId: clip.id,
           trackId: track.id,
@@ -690,6 +698,10 @@ export function buildScene(
               scalar(clip, 'volume', animationTime(clip, t), clip.volume ?? 1),
             ) *
             master *
+            (clip.fadeInSec ? clamp((t - clip.start) / clip.fadeInSec) : 1) *
+            (clip.fadeOutSec
+              ? clamp((clip.start + clip.duration - t) / clip.fadeOutSec)
+              : 1) *
             duckGain *
             (muted ? 0 : 1),
         };

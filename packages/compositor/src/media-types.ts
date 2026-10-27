@@ -16,6 +16,10 @@ export interface MediaClip {
   in: number;
   speed: number;
   volume?: number;
+  fadeInSec?: number;
+  fadeOutSec?: number;
+  keepPitch?: boolean;
+  duckUnderVoice?: boolean;
   audioRole?: 'voice' | 'music' | 'other';
   animationOffsetSec?: number;
   keyframes?: readonly {

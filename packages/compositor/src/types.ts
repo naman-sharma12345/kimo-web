@@ -36,6 +36,7 @@ export interface ResolvedText {
   safeRect: { x: number; y: number; width: number; height: number };
   anchor: { x: number; y: number };
   scale: number;
+  verticalAnchor?: 'top';
   words: { text: string; start: number; end: number; active: boolean }[];
 }
 export interface ResolvedTransitionPair {
@@ -104,7 +105,11 @@ export interface SceneGraph {
   width: number;
   height: number;
   fps: KimoProject['fps'];
+  /** Normalized project clear/composite colour, not an editor UI colour. */
+  background?: [number, number, number, number];
   layers: ResolvedLayer[];
+  /** Transient transparent pair placeholders, never text pixels or persisted state. */
+  excludedTextPairs?: { layer: ResolvedLayer; index: number }[];
   /** Optional for legacy synthetic scenes; builder always supplies an array. */
   transitionPairs?: ResolvedTransitionPair[];
   audio: ResolvedAudio[];

@@ -17,7 +17,7 @@ import {
   PopoverTrigger,
   PopoverContent,
 } from '@/components/ui/popover';
-import { useStudio } from '@/stores/studio';
+import { useStudio, canPlayPreview } from '@/stores/studio';
 import { IconButton } from './controls';
 export function timecode(seconds: number, fps = 30): string {
   const frames = Math.max(0, Math.round(seconds * fps));
@@ -59,7 +59,8 @@ export function StudioTransport() {
           aria-label={state.playing ? 'pause preview' : 'play preview'}
           tooltip="play/pause (Space)"
           aria-pressed={state.playing}
-          onClick={() => useStudio.setState({ playing: !state.playing })}
+          disabled={!canPlayPreview(state.previewStatus)}
+          onClick={() => state.requestPlayback(!state.playing)}
         >
           {state.playing ? <Pause /> : <Play />}
         </Button>
@@ -112,6 +113,7 @@ export function StudioTransport() {
         <Button
           variant="ghost"
           size="xs"
+          disabled={!canPlayPreview(state.previewStatus)}
           aria-pressed={state.scrubAudioEnabled}
           onClick={() =>
             useStudio.setState({ scrubAudioEnabled: !state.scrubAudioEnabled })

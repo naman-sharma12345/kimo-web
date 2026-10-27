@@ -12,7 +12,10 @@ import type {
 } from './renderer-types';
 interface AppHarness {
   stage: Container;
-  renderer: { resize: ReturnType<typeof vi.fn> };
+  renderer: {
+    resize: ReturnType<typeof vi.fn>;
+    background: { color: unknown; alpha: number };
+  };
   init: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
   render: ReturnType<typeof vi.fn>;
@@ -56,10 +59,21 @@ vi.mock('pixi.js', async (original) => {
     ...pixi,
     GlProgram: { from: vi.fn((options: unknown) => options) },
     Text: FakeText,
-    CanvasTextMetrics: { measureText: vi.fn(() => ({ width: 12 })) },
+    CanvasTextMetrics: {
+      clearMetrics: vi.fn(),
+      measureText: vi.fn(
+        (_text: string, style: import('pixi.js').TextStyle) => ({
+          width: 12,
+          lineHeight: style.fontSize + 7.25,
+        }),
+      ),
+    },
     Application: class {
       stage = new pixi.Container();
-      renderer = { resize: vi.fn() };
+      renderer = {
+        resize: vi.fn(),
+        background: { color: 0 as unknown, alpha: 1 },
+      };
       init = vi.fn(async (options: ApplicationOptions) => {
         void options; /* no GPU creation */
         const failure = harness.initFailures.shift();
@@ -182,9 +196,14 @@ describe('host and external-clock lifecycle', () => {
   });
   it('surfaces both failures when neither backend initializes', async () => {
     harness.initFailures.push(new Error('gpu'), new Error('gl'));
-    await expect(renderer()).rejects.toThrow(
+    const failure = await renderer().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).message).toBe(
       'WebGPU/WebGL preview initialization failed',
     );
+    expect(
+      (failure as AggregateError).errors.map((error: Error) => error.message),
+    ).toEqual(['gpu', 'gl', expect.stringContaining('GPU support:')]);
     expect(harness.apps.every((a) => a.destroy.mock.calls.length === 1)).toBe(
       true,
     );
@@ -688,6 +707,23 @@ describe('resolved geometry, effects and content text', () => {
     expect(words[0]?.style.fill).toBe(textStyles['caption-pop'].fill);
     r.destroy();
   });
+  it('retries a failed font and rebuilds fallback text only after the requested face actually loads', async () => {
+    const load = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const r = await renderer(() => undefined, load);
+    const a = layer('t', 'text');
+    a.text = resolveText({ content: 'retry', style: 'quote' }, 0, 1920, 1080);
+    await r.render(scene([a]));
+    const first = harness.texts[0];
+    expect(first).toBeDefined();
+    const second = await r.render(scene([a], 1));
+    expect(
+      second.approximations.some((x) => x.reason.includes('font unavailable')),
+    ).toBe(false);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(harness.texts).toHaveLength(2);
+    expect(harness.texts[1]).not.toBe(first);
+    r.destroy();
+  });
   it('labels failed font load and still submits a defined approximation', async () => {
     const r = await renderer(
       () => undefined,
@@ -852,6 +888,39 @@ describe('paired transition isolation without GPU pixel assertions', () => {
       ],
     };
   }
+  it.each(['crossfade', 'dip'] as const)(
+    'keeps %s pair weights/black plane when an edited text visual is excluded',
+    async (kind) => {
+      const resources = vi.fn((req: RendererResourceRequest) =>
+        lease(req.clipId),
+      );
+      const r = await renderer(resources);
+      const input = paired(kind);
+      const excluded = input.layers.find((l) => l.clipId === 'out');
+      if (!excluded) throw new Error('Missing pair fixture');
+      input.layers = input.layers.filter((l) => l.clipId !== 'out');
+      input.excludedTextPairs = [
+        {
+          index: 1,
+          layer: { ...excluded, kind: 'text', assetId: undefined, opacity: 0 },
+        },
+      ];
+      const result = await r.render(input);
+      expect(
+        result.approximations.map((a) => a.reason).join(' '),
+      ).not.toContain('members missing');
+      expect(resources.mock.calls.some(([req]) => req.clipId === 'out')).toBe(
+        false,
+      );
+      const group = root().children.find((n) => n.label === 'transition:pair');
+      if (!group) throw new Error('Missing pair container');
+      expect(group.children[0]?.alpha).toBe(kind === 'dip' ? 1 : 0);
+      expect(group.children[1]?.alpha).toBe(0);
+      expect(group.children[2]?.alpha).toBe(kind === 'dip' ? 0 : 0.3);
+      expect(harness.texts).toHaveLength(0);
+      r.destroy();
+    },
+  );
   it('isolates each weighted premultiplied member additively and source-overs the pair once at incoming z', async () => {
     const r = await renderer((req) => lease(req.clipId));
     await r.render(paired());
@@ -923,4 +992,366 @@ describe('paired transition isolation without GPU pixel assertions', () => {
     expect(root().children.some((n) => n.label === 'in')).toBe(true);
     r.destroy();
   });
+});
+
+describe('failure-only GPU diagnostics (no device/context creation)', () => {
+  it('reports absent API and null adapter distinctly without claiming GL context support', async () => {
+    const { gpuAvailabilityDiagnostic } = await import('./pixi-renderer');
+    expect(
+      (
+        await gpuAvailabilityDiagnostic({
+          secureContext: true,
+          webgl2Api: false,
+        })
+      ).message,
+    ).toContain('WebGPU adapter API absent');
+    const requestAdapter = vi.fn(async () => null);
+    const diagnostic = await gpuAvailabilityDiagnostic({
+      secureContext: true,
+      webgl2Api: true,
+      requestAdapter,
+    });
+    expect(diagnostic.message).toContain('unavailable (null adapter)');
+    expect(diagnostic.message).toContain('context not probed');
+    expect(requestAdapter).toHaveBeenCalledTimes(1);
+  });
+  it('bounds a hanging probe and excludes raw probe rejection text', async () => {
+    const { gpuAvailabilityDiagnostic } = await import('./pixi-renderer');
+    const rejected = await gpuAvailabilityDiagnostic({
+      secureContext: false,
+      webgl2Api: false,
+      requestAdapter: async () => {
+        throw new Error('secret');
+      },
+    });
+    expect(rejected.message).toContain('probe rejected');
+    expect(rejected.message).not.toContain('secret');
+    vi.useFakeTimers();
+    try {
+      const pending = gpuAvailabilityDiagnostic({
+        secureContext: true,
+        webgl2Api: true,
+        requestAdapter: () => new Promise(() => undefined),
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      expect((await pending).message).toContain('availability unknown');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('Phase 7 text layout and project background', () => {
+  it.each(['left', 'center', 'right'] as const)(
+    'matches measured and rendered %s text with source colour and top glyph bounds',
+    async (alignment) => {
+      const { measureTextOverlay } = await import('./index');
+      const r = await renderer(() => undefined);
+      const a = layer('t', 'text');
+      a.text = resolveText(
+        {
+          style: 'caption-pop',
+          content: 'one lengthy two',
+          position: 'top',
+          alignment,
+          fontSize: 90,
+          color: [1, 0.5, 0, 0.25],
+          words: [
+            { w: 'one', t: 0, d: 1 },
+            { w: 'lengthy', t: 1, d: 1 },
+            { w: 'two', t: 2, d: 1 },
+          ],
+        },
+        1,
+        1920,
+        1080,
+      );
+      a.text.safeRect.width = 500;
+      const graph = scene([a]);
+      await r.render(graph);
+      const layout = await measureTextOverlay(a, graph);
+      const block = must(content().children.at(-1));
+      const bounds = block.getLocalBounds();
+      expect(layout?.y).toBe(54 - 540);
+      expect(block.y + bounds.y).toBe(layout?.y);
+      expect(block.x + bounds.x).toBe(layout?.x);
+      expect(layout?.words.map((w) => [w.x, w.y, w.width, w.height])).toEqual(
+        block.children.map((w) => {
+          const b = w.getLocalBounds();
+          return [block.x + w.x + b.x, block.y + w.y + b.y, b.width, b.height];
+        }),
+      );
+      expect(harness.texts[0]?.style.align).toBe(alignment);
+      expect(harness.texts[0]?.style.fill).toBe('rgba(255, 128, 0, 0.25)');
+      expect(harness.texts[1]?.style.fill).toBe('#FFD84D');
+      r.destroy();
+    },
+  );
+  it('renders type-on partial content without full old word nodes and reuses same-character frames', async () => {
+    const r = await renderer(() => undefined);
+    const a = layer('t', 'text');
+    const text = {
+      style: 'caption-pop' as const,
+      content: 'fresh',
+      animation: 'type on' as const,
+      words: [{ w: 'stale', t: 0, d: 10 }],
+    };
+    a.text = resolveText(text, 0.1, 1920, 1080);
+    await r.render(scene([a]));
+    expect(harness.texts.map((t) => t.text)).toEqual(['FRE']);
+    const primary = harness.texts[0];
+    a.text = resolveText(text, 0.099, 1920, 1080);
+    await r.render(scene([a], 1));
+    expect(harness.texts).toEqual([primary]);
+    r.destroy();
+  });
+  it('sets the real renderer clear colour/alpha on the existing application', async () => {
+    const r = await renderer();
+    await r.render({ ...scene([]), background: [1, 0.5, 0, 0.25] });
+    expect(app().renderer.background).toEqual({
+      color: [1, 0.5, 0],
+      alpha: 0.25,
+    });
+    await r.render(scene([]));
+    expect(app().renderer.background).toEqual({ color: [0, 0, 0], alpha: 1 });
+    expect(harness.apps).toHaveLength(1);
+    r.destroy();
+  });
+});
+
+describe('Primary/secondary viewer measurement contract', () => {
+  function fontSet(value: unknown): () => void {
+    const previous = Object.getOwnPropertyDescriptor(document, 'fonts');
+    Object.defineProperty(document, 'fonts', { configurable: true, value });
+    return () => {
+      if (previous) Object.defineProperty(document, 'fonts', previous);
+      else Reflect.deleteProperty(document, 'fonts');
+    };
+  }
+  function lowerThird() {
+    const a = layer('text', 'text');
+    a.text = resolveText(
+      {
+        style: 'lower-third',
+        content: 'Primary',
+        secondaryContent: 'Secondary line',
+        alignment: 'right',
+        color: [0.1, 0.2, 0.3, 0.4],
+      },
+      0,
+      1080,
+      1920,
+    );
+    return a;
+  }
+  it('exposes separate actual primary/secondary glyph bounds and measured typography without changing combined bounds', async () => {
+    const { measureResolvedTextLayout } = await import('./index');
+    const a = lowerThird();
+    const loadFont = vi.fn(async () => true);
+    const measured = await measureResolvedTextLayout(
+      a,
+      { ...scene([a]), width: 1080, height: 1920 },
+      { loadFont },
+    );
+    expect(measured?.status).toBe('ready');
+    expect(measured?.primary.style).toMatchObject({
+      fontFamily: 'Geist',
+      fontWeight: 500,
+      fontSize: 22.5,
+      lineHeight: 29.75,
+      letterSpacing: 0,
+      color: 'rgba(26, 51, 77, 0.4)',
+      textAlign: 'right',
+    });
+    expect(measured?.secondary?.style).toMatchObject({
+      fontFamily: 'Geist',
+      fontWeight: 400,
+      fontSize: 15.75,
+      lineHeight: 23,
+      letterSpacing: 0,
+      color: 'rgba(26, 51, 77, 0.4)',
+      textAlign: 'right',
+    });
+    const primary = measured?.primary.bounds,
+      secondary = measured?.secondary?.bounds;
+    if (!measured || !primary || !secondary)
+      throw new Error('Missing measured regions');
+    expect(primary.y).toBe(measured.y);
+    expect(secondary.y).toBeCloseTo(primary.y + primary.height, 12);
+    expect(measured.width).toBe(Math.max(primary.width, secondary.width));
+    expect(measured.height).toBeCloseTo(primary.height + secondary.height, 12);
+    expect(loadFont.mock.calls).toHaveLength(2);
+    expect(harness.apps).toHaveLength(0); // CPU text layout, no extra renderer/context.
+  });
+  it('shares primary/secondary node layout with the retained renderer including alignment', async () => {
+    const { measureTextOverlay } = await import('./index');
+    const r = await renderer(() => undefined);
+    const a = lowerThird(),
+      graph = { ...scene([a]), width: 1080, height: 1920 };
+    await r.render(graph);
+    const measured = await measureTextOverlay(a, graph, {
+      loadFont: async () => true,
+    });
+    const block = must(content().children.at(-1));
+    const expected = block.children.map((child) => {
+      const box = child.getLocalBounds();
+      return {
+        x: block.x + child.x + box.x,
+        y: block.y + child.y + box.y,
+        width: box.width,
+        height: box.height,
+      };
+    });
+    expect(measured?.primary.bounds).toEqual(expected[0]);
+    expect(measured?.secondary?.bounds).toEqual(expected[1]);
+    r.destroy();
+  });
+  it('requires registered loaded faces, not check=true with empty fallback faces', async () => {
+    const { measureTextOverlay } = await import('./index');
+    const restore = fontSet({
+      status: 'loaded',
+      load: vi.fn(async () => []),
+      check: vi.fn(() => true),
+    });
+    try {
+      const a = lowerThird();
+      expect((await measureTextOverlay(a, scene([a])))?.status).toBe(
+        'unavailable',
+      );
+    } finally {
+      restore();
+    }
+  });
+  it('returns pending promptly, keeps measured data, and becomes ready only after actual faces load', async () => {
+    const { measureTextOverlay } = await import('./index');
+    const fonts = {
+      status: 'loading',
+      load: vi.fn(async () => [{ status: 'loaded' }]),
+      check: vi.fn(() => true),
+    };
+    const restore = fontSet(fonts);
+    try {
+      const a = lowerThird();
+      const pending = await measureTextOverlay(a, scene([a]));
+      expect(pending?.status).toBe('font-pending');
+      expect(pending?.primary.bounds.width).toBeGreaterThan(0);
+      const cleared = vi.mocked(CanvasTextMetrics.clearMetrics).mock.calls
+        .length;
+      fonts.status = 'loaded';
+      expect((await measureTextOverlay(a, scene([a])))?.status).toBe('ready');
+      expect(CanvasTextMetrics.clearMetrics).toHaveBeenCalledTimes(cleared + 1);
+    } finally {
+      restore();
+    }
+  });
+  it('reports unavailable for rejected load, absent FontFaceSet or any missing secondary font', async () => {
+    const { measureTextOverlay } = await import('./index');
+    const a = lowerThird();
+    const restore = fontSet(undefined);
+    try {
+      expect((await measureTextOverlay(a, scene([a])))?.status).toBe(
+        'unavailable',
+      );
+    } finally {
+      restore();
+    }
+    expect(
+      (
+        await measureTextOverlay(a, scene([a]), {
+          loadFont: async (css) => !css.includes('400'),
+        })
+      )?.status,
+    ).toBe('unavailable');
+    expect(
+      (
+        await measureTextOverlay(a, scene([a]), {
+          loadFont: async () => {
+            throw new Error('font failed');
+          },
+        })
+      )?.status,
+    ).toBe('unavailable');
+  });
+  it('omits secondary when no secondary glyphs exist, and never substitutes fontSize*1.2 for absent metrics', async () => {
+    const { measureTextOverlay } = await import('./index');
+    const a = layer('text', 'text');
+    a.text = resolveText({ style: 'title', content: 'Single' }, 0, 1920, 1080);
+    const measured = await measureTextOverlay(a, scene([a]), {
+      loadFont: async () => true,
+    });
+    expect(measured?.secondary).toBeUndefined();
+    expect(measured?.primary.style.lineHeight).toBe(127.25);
+    expect(measured?.primary.style.lineHeight).not.toBe(144);
+    vi.mocked(CanvasTextMetrics.measureText).mockReturnValueOnce({
+      width: 12,
+      lineHeight: NaN,
+    } as ReturnType<typeof CanvasTextMetrics.measureText>);
+    await expect(
+      measureTextOverlay(a, scene([a]), { loadFont: async () => true }),
+    ).rejects.toThrow('typography metrics unavailable');
+    expect(harness.apps).toHaveLength(0);
+  });
+});
+
+it('retains lower-third secondary glyphs and separate editable bounds in pop-word mode', async () => {
+  const { measureTextOverlay } = await import('./index');
+  const r = await renderer(() => undefined);
+  const a = layer('t', 'text');
+  a.text = resolveText(
+    {
+      style: 'lower-third',
+      content: 'one two',
+      secondaryContent: 'role',
+      animation: 'pop words',
+    },
+    0,
+    1920,
+    1080,
+  );
+  await r.render(scene([a]));
+  expect(harness.texts.map((t) => t.text)).toEqual(['one', 'two', 'role']);
+  const layout = await measureTextOverlay(a, scene([a]), {
+    loadFont: async () => true,
+  });
+  expect(layout?.secondary?.bounds.height).toBeGreaterThan(0);
+  expect(layout?.secondary?.bounds.y).toBeCloseTo(
+    (layout?.primary.bounds.y ?? 0) + (layout?.primary.bounds.height ?? 0),
+    12,
+  );
+  r.destroy();
+});
+
+it('keeps legacy combined-bound assignments compatible and exposes uppercase plus actual stroke alpha', async () => {
+  const { measureTextOverlay } = await import('./index');
+  const legacy: import('./index').TextOverlayBounds = {
+    x: 0,
+    y: 0,
+    width: 10,
+    height: 20,
+    words: [],
+  };
+  expect(legacy.primary).toBeUndefined();
+  expect(legacy.status).toBeUndefined();
+  const a = layer('t', 'text');
+  a.text = resolveText(
+    { style: 'caption-pop', content: 'source case' },
+    0,
+    1920,
+    1080,
+  );
+  expect(
+    (await measureTextOverlay(a, scene([a]), { loadFont: async () => true }))
+      ?.primary.style.textTransform,
+  ).toBe('uppercase');
+  a.text = resolveText(
+    { style: 'caption-clean', content: 'source case' },
+    0,
+    1920,
+    1080,
+  );
+  const style = (
+    await measureTextOverlay(a, scene([a]), { loadFont: async () => true })
+  )?.primary.style;
+  expect(style?.textTransform).toBe('none');
+  expect(style?.WebkitTextStroke).toBe('2px rgba(0, 0, 0, 0.25)');
 });

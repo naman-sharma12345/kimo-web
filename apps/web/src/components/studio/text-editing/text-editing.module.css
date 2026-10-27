@@ -1,0 +1,207 @@
+.field {
+  min-width: 0;
+  width: 100%;
+  color: var(--cream-100);
+  font-family: var(--font-sans);
+  font-size: var(--t-13);
+  line-height: var(--leading-13);
+}
+.input,
+.viewerField {
+  caret-color: var(--cream-100);
+}
+.input::selection,
+.viewerField::selection,
+.viewerField *::selection {
+  background: color-mix(in srgb, var(--orange) 35%, transparent);
+  color: var(--cream-100);
+}
+.input:focus-visible,
+.viewerField:focus-visible,
+.hint:focus-visible,
+.time:focus-visible,
+.control select:focus-visible,
+.intents button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.inline .input {
+  min-height: var(--control-xs);
+  padding: 0 var(--space-4);
+  font-size: var(--t-12);
+  line-height: var(--leading-12);
+  background: var(--ink-2);
+}
+.suggestion {
+  font-size: var(--t-11);
+  line-height: var(--leading-11);
+  color: var(--warning);
+}
+.hint {
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: var(--space-4) 0;
+  cursor: pointer;
+}
+.suggestedText {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--cream-100);
+  margin: var(--space-8) 0;
+}
+.error {
+  color: var(--error);
+  font-size: var(--t-12);
+  line-height: var(--leading-12);
+}
+.viewerHost {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.viewerTransform {
+  position: absolute;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.viewerField {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+}
+.viewerSuggestion {
+  position: absolute;
+  left: var(--space-16);
+  bottom: var(--space-16);
+  pointer-events: auto;
+  background: var(--ink-1);
+  max-width: calc(100% - var(--space-32));
+}
+.pending {
+  color: var(--cream-60);
+  font: var(--t-12) / var(--leading-12) var(--font-sans);
+  padding: var(--space-12);
+}
+.intents {
+  position: absolute;
+  right: var(--space-8);
+  top: var(--space-8);
+  display: flex;
+  gap: var(--space-4);
+  pointer-events: auto;
+}
+.intents button {
+  background: var(--ink-2);
+  color: var(--cream-100);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  padding: var(--space-4);
+}
+.captions {
+  --caption-row-min: 150px;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  font: var(--t-13) / var(--leading-13) var(--font-sans);
+  color: var(--cream-100);
+}
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  padding-block: var(--space-8);
+}
+.control {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  font-size: var(--t-12);
+  color: var(--cream-60);
+}
+.control select {
+  background: var(--ink-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-8);
+  color: var(--cream-100);
+  min-height: var(--control-sm);
+}
+.replace {
+  display: grid;
+  gap: var(--space-8);
+}
+.captionList {
+  overflow: auto;
+  max-height: 60vh;
+  scrollbar-color: var(--cream-16) var(--ink-1);
+}
+.captionRow {
+  min-height: var(--caption-row-min);
+  padding: var(--space-8);
+  border-bottom: 1px solid var(--line);
+}
+.captionRow[data-active='true'] {
+  background: var(--orange-12);
+}
+.captionRow[data-active='true'] .time {
+  color: var(--orange);
+}
+.captionHeading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-4);
+}
+.time {
+  background: transparent;
+  border: 0;
+  padding: var(--space-4) 0;
+  cursor: pointer;
+  color: var(--cream-38);
+  font: var(--t-11) / var(--leading-11) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.trash {
+  width: var(--space-16);
+  height: var(--space-16);
+}
+.captionTiming {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-4);
+  margin-top: var(--space-8);
+  font: var(--t-11) / var(--leading-11) var(--font-mono);
+  color: var(--cream-38);
+}
+.captionTiming label {
+  min-width: 0;
+  flex: 1 1 var(--space-80);
+}
+.captionTiming input {
+  width: 100%;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.captionDialog {
+  width: calc(100vw - var(--space-32));
+  max-width: calc(var(--space-128) * 6);
+  max-height: calc(100dvh - var(--space-32));
+  overflow: auto;
+}
+@media (max-width: 600px) {
+  .captionDialog {
+    width: 100vw;
+    max-width: 100vw;
+    border-radius: 0;
+  }
+}

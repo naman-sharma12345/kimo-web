@@ -37,6 +37,8 @@ export interface StudioSlots {
   transport?: React.ReactNode;
   timeline?: React.ReactNode;
   timelineFooter?: React.ReactNode;
+  /** A functional timeline already owns its ruler, scrollbars and footer. */
+  timelineOwnsChrome?: boolean;
   inspector?: React.ReactNode;
   agentChat?: React.ReactNode;
   agentActions?: React.ReactNode;
@@ -330,12 +332,17 @@ export function TimelinePanel({
   project,
   slots,
   toggle,
+  zoom,
+  onZoomChange,
 }: {
   project: KimoProject;
   slots: StudioSlots;
   toggle: () => void;
+  zoom?: number | null;
+  onZoomChange?: (value: number | null) => void;
 }) {
   const state = useStudio();
+  const zoomValue = zoom ?? 40;
   const tools = [
     { id: 'select', label: 'select (V)', icon: MousePointer2 },
     { id: 'blade', label: 'blade (B)', icon: Scissors },
@@ -378,7 +385,8 @@ export function TimelinePanel({
           onClick={() => useStudio.setState({ linked: !state.linked })}
         />
         <span className="studio-tool-hint">
-          {state.tool} · editing connects in Phase 7
+          {state.tool}
+          {slots.timelineOwnsChrome ? '' : ' · editing connects in Phase 7'}
         </span>
         <span className="studio-flex" />
         <div className="studio-timeline-zoom">
@@ -387,29 +395,43 @@ export function TimelinePanel({
             label="zoom out timeline"
             size="xs"
             onClick={() =>
-              useStudio.setState({ zoom: Math.max(0.25, state.zoom - 0.25) })
+              onZoomChange
+                ? onZoomChange(Math.max(4, zoomValue / 1.25))
+                : useStudio.setState({
+                    zoom: Math.max(0.25, state.zoom - 0.25),
+                  })
             }
           />
           <Slider
             aria-label="timeline zoom"
-            min={0.25}
-            max={4}
-            step={0.25}
-            value={[state.zoom]}
-            onValueChange={([zoom]) => useStudio.setState({ zoom: zoom ?? 1 })}
+            min={onZoomChange ? 4 : 0.25}
+            max={onZoomChange ? 600 : 4}
+            step={onZoomChange ? 1 : 0.25}
+            value={[onZoomChange ? zoomValue : state.zoom]}
+            onValueChange={([value]) =>
+              onZoomChange
+                ? onZoomChange(value ?? null)
+                : useStudio.setState({ zoom: value ?? 1 })
+            }
           />
           <IconButton
             icon={ZoomIn}
             label="zoom in timeline"
             size="xs"
             onClick={() =>
-              useStudio.setState({ zoom: Math.min(4, state.zoom + 0.25) })
+              onZoomChange
+                ? onZoomChange(Math.min(600, zoomValue * 1.25))
+                : useStudio.setState({ zoom: Math.min(4, state.zoom + 0.25) })
             }
           />
           <Button
             variant="ghost"
             size="xs"
-            onClick={() => useStudio.setState({ zoom: 1 })}
+            onClick={() =>
+              onZoomChange
+                ? onZoomChange(null)
+                : useStudio.setState({ zoom: 1 })
+            }
           >
             fit
           </Button>
@@ -425,11 +447,16 @@ export function TimelinePanel({
       </div>
       {!state.timelineCollapsed && (
         <>
-          <div className="studio-ruler" aria-label="timeline ruler">
-            <span className="studio-track-header" />
-            <span>00:00</span>
-          </div>
-          <div className="studio-timeline-tracks">
+          {!slots.timelineOwnsChrome && (
+            <div className="studio-ruler" aria-label="timeline ruler">
+              <span className="studio-track-header" />
+              <span>00:00</span>
+            </div>
+          )}
+          <div
+            className="studio-timeline-tracks"
+            data-editor={slots.timelineOwnsChrome || undefined}
+          >
             {slots.timeline ??
               (!state.hasOps ? (
                 <div
@@ -456,16 +483,18 @@ export function TimelinePanel({
                 </>
               ))}
           </div>
-          <div className="studio-timeline-footer">
-            {slots.timelineFooter ?? (
-              <div
-                className="studio-minimap"
-                aria-label="timeline scrollbar (Phase 7)"
-              >
-                <span />
-              </div>
-            )}
-          </div>
+          {!slots.timelineOwnsChrome && (
+            <div className="studio-timeline-footer">
+              {slots.timelineFooter ?? (
+                <div
+                  className="studio-minimap"
+                  aria-label="timeline scrollbar (Phase 7)"
+                >
+                  <span />
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </Panel>

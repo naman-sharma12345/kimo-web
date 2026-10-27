@@ -8,7 +8,8 @@ import {
 import { MediaPool } from './media-pool';
 import type { MediaFrame } from './media-types';
 import type { SceneRenderer, RenderResult } from './renderer-types';
-vi.mock('./audio-engine', () => ({
+vi.mock('./audio-engine', async (original) => ({
+  ...(await original<typeof import('./audio-engine')>()),
   AudioEngine: class {
     resume = vi.fn(async () => true);
     audioTime = () => null;
@@ -16,6 +17,14 @@ vi.mock('./audio-engine', () => ({
     pause = vi.fn();
     dispose = vi.fn();
     scrub = vi.fn();
+    getLevels = vi.fn(() => ({
+      available: false,
+      state: 'unavailable',
+      peak: 0,
+      rms: 0,
+      peakDb: null,
+      rmsDb: null,
+    }));
     loadBuffer = vi.fn(async () => undefined);
   },
 }));
@@ -83,8 +92,10 @@ async function setup(
     editAt = vi.fn(),
     overlay = vi.fn(),
     cancel = vi.fn();
+  const onScene = vi.fn();
   const controller = new CompositorController({
     project,
+    onScene,
     renderer,
     pool,
     now: () => time,
@@ -113,6 +124,7 @@ async function setup(
     controller,
     renderer,
     pool,
+    onScene,
     playback,
     editAt,
     overlay,
@@ -616,4 +628,127 @@ describe('Resolved media source timing', () => {
     );
     s.controller.dispose();
   });
+});
+
+describe('Phase 7 transient preview hooks', () => {
+  it('hides only visual text and restores on cancel/commit without changing project or scene metadata', async () => {
+    const s = await setup();
+    await s.step(0);
+    const baseline = structuredClone(project);
+    s.controller.setEditingTextClip('a');
+    await s.step(16);
+    const hidden = vi.mocked(s.renderer.render).mock.calls.at(-1)?.[0];
+    expect(hidden?.layers).toEqual([]);
+    expect(
+      s.onScene.mock.calls
+        .at(-1)?.[0]
+        .layers.map((l: import('./types').ResolvedLayer) => l.clipId),
+    ).toEqual(['a']);
+    expect(project).toEqual(baseline);
+    s.controller.setEditingTextClip(null);
+    await s.step(32);
+    expect(
+      vi
+        .mocked(s.renderer.render)
+        .mock.calls.at(-1)?.[0]
+        .layers.map((l) => l.clipId),
+    ).toEqual(['a']);
+    s.controller.setEditingTextClip('a');
+    s.controller.updateProject({
+      ...project,
+      clips: {
+        a: {
+          ...requiredClip(),
+          text: { style: 'title', content: 'committed' },
+        },
+      },
+    });
+    s.controller.setEditingTextClip(null);
+    await s.step(48);
+    expect(
+      vi.mocked(s.renderer.render).mock.calls.at(-1)?.[0].layers[0]?.text
+        ?.content,
+    ).toBe('committed');
+    s.controller.dispose();
+  });
+  it('exposes unavailable compare and buffered pitch honestly, and video native capability', async () => {
+    const s = await setup();
+    expect(s.controller.getAudioLevel()).toMatchObject({
+      available: false,
+      state: 'unavailable',
+      peak: 0,
+    });
+    expect(s.controller.getCompareCapability()).toMatchObject({
+      available: false,
+      reason: expect.stringContaining('not implemented'),
+    });
+    expect(s.controller.getAudioCapabilities('missing')).toMatchObject({
+      keepPitch: false,
+      reason: expect.any(String),
+    });
+    s.controller.updateProject({
+      ...project,
+      clips: { a: { ...requiredClip(), kind: 'video' } },
+    });
+    expect(s.controller.getAudioCapabilities('a')).toEqual({ keepPitch: true });
+    s.controller.dispose();
+  });
+});
+
+function requiredClip() {
+  const clip = project.clips.a;
+  if (!clip) throw new Error('Missing fixture clip');
+  return clip;
+}
+
+it('excludes edited text pixels but retains transparent pair metadata and the complete published scene', async () => {
+  const s = await setup();
+  const a = requiredClip();
+  s.controller.updateProject({
+    ...project,
+    clips: {
+      a: {
+        ...a,
+        duration: 5,
+        transitionOut: { kind: 'crossfade', durationFrames: 30 },
+      },
+      b: {
+        ...a,
+        id: 'b',
+        start: 5,
+        duration: 5,
+        transitionIn: { kind: 'crossfade', durationFrames: 30 },
+      },
+    },
+  });
+  s.controller.seek(5);
+  s.controller.setEditingTextClip('a');
+  await s.step(0);
+  const rendered = vi.mocked(s.renderer.render).mock.calls.at(-1)?.[0];
+  expect(rendered?.layers.map((l) => l.clipId)).toEqual(['b']);
+  expect(rendered?.transitionPairs).toHaveLength(1);
+  expect(rendered?.excludedTextPairs?.[0]).toMatchObject({
+    index: 0,
+    layer: { clipId: 'a', opacity: 0 },
+  });
+  expect(rendered?.excludedTextPairs?.[0]?.layer.text).toBeUndefined();
+  expect(s.onScene.mock.calls.at(-1)?.[0].layers).toHaveLength(2);
+  s.controller.dispose();
+});
+
+it('exposes currentScene as the last submitted unfiltered metadata while text is hidden', async () => {
+  const s = await setup();
+  expect(s.controller.currentScene).toBeNull();
+  await s.step(0);
+  expect(s.controller.currentScene?.layers[0]?.text?.content).toBe('hello');
+  s.controller.setEditingTextClip('a');
+  await s.step(16);
+  expect(s.controller.currentScene?.layers[0]?.clipId).toBe('a');
+  expect(
+    vi.mocked(s.renderer.render).mock.calls.at(-1)?.[0].layers,
+  ).toHaveLength(0);
+  s.controller.setEditingTextClip(null);
+  await s.step(32);
+  expect(s.controller.currentScene?.layers[0]?.text?.content).toBe('hello');
+  s.controller.dispose();
 });

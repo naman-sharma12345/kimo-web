@@ -9,16 +9,20 @@ export function invertAssetLocalMap(
   );
 }
 export function createFilmstripCache(
-  mapping: Readonly<Record<string, string>>,
+  mapping:
+    Readonly<Record<string, string>> | (() => Readonly<Record<string, string>>),
 ): FilmstripCache {
-  const localByAsset = invertAssetLocalMap(mapping);
+  const localIdFor = (assetId: string) =>
+    invertAssetLocalMap(
+      typeof mapping === 'function' ? mapping() : mapping,
+    ).get(assetId);
   // Timestamped entries use versioned keys and are never forged from legacy Blob[] bins.
   const metadata = new Map<string, FilmstripCacheEntry>();
   return {
     async read(key, asset) {
       const current = metadata.get(key);
       if (current) return current;
-      const localId = localByAsset.get(asset.id);
+      const localId = localIdFor(asset.id);
       if (!localId) return undefined;
       const legacy = await readMedia(localId);
       // Old frames have no source timestamps. Re-extract rather than pretending exact cache hits.
@@ -28,7 +32,7 @@ export function createFilmstripCache(
     },
     async write(key, entry, asset) {
       metadata.set(key, entry);
-      const localId = localByAsset.get(asset.id);
+      const localId = localIdFor(asset.id);
       if (!localId) return;
       const previous = await readMedia(localId);
       await writeMedia(localId, {

@@ -837,3 +837,17 @@
   scrollbar-width: thin;
   overscroll-behavior: contain;
 }
+
+.studio-timeline-tracks[data-editor] {
+  display: block;
+  overflow: hidden;
+}
+
+.studio-system-activity {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  color: var(--cream-38);
+  font-size: var(--t-11);
+}

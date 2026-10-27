@@ -35,6 +35,10 @@ const snapshot: SessionSnapshot = {
   assets: [],
 };
 beforeEach(() => {
+  // These integration tests exercise state/lifecycle only, never canvas pixels or GPU acceptance.
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+    () => null,
+  );
   vi.stubGlobal(
     'ResizeObserver',
     class {
@@ -89,7 +93,13 @@ describe('Phase 5 studio shell integration', () => {
       screen.getByText('kimo is laying out the first cut…'),
     ).toBeInTheDocument();
     expect(screen.queryByText('preview 60 fps')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('loading timeline')).toBeInTheDocument();
+    expect(
+      screen.getByRole('grid', { name: 'timeline editor' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole('slider', { name: 'timeline scrubber' }),
+    ).toHaveLength(1);
+    expect(screen.queryByLabelText('loading timeline')).not.toBeInTheDocument();
   });
   it('restores only supplied recorded IDs after reset and deduplicates live replay', () => {
     const actionIds = ['server-recorded-a', 'server-recorded-b'];

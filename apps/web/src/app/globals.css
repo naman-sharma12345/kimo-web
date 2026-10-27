@@ -1,5 +1,19 @@
 @import 'tailwindcss';
 @import '../styles/tokens.css';
+@font-face {
+  font-family: 'Geist';
+  src: url('/fonts/geist-sans-variable.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/fonts/geist-mono-variable.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
 /* Video-content fonts only. Studio chrome continues to use the design tokens. */
 @font-face {
   font-family: 'Anton';
@@ -24,8 +38,8 @@
 }
 :root {
   color-scheme: dark;
-  --font-sans: var(--font-geist-sans), 'Geist', ui-sans-serif, system-ui;
-  --font-mono: var(--font-geist-mono), 'Geist Mono', ui-monospace;
+  --font-sans: 'Geist', ui-sans-serif, system-ui;
+  --font-mono: 'Geist Mono', ui-monospace;
 }
 * {
   box-sizing: border-box;

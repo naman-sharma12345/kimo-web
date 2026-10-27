@@ -155,6 +155,10 @@ interface ToastContextValue {
   dismiss: (id: string) => void;
 }
 const ToastContext = React.createContext<ToastContextValue | null>(null);
+/** Optional structural injection for independently mounted editor surfaces. */
+export function useOptionalToast(): ToastContextValue | null {
+  return React.useContext(ToastContext);
+}
 export function useToast(): ToastContextValue {
   const context = React.useContext(ToastContext);
   if (!context) throw new Error('useToast requires ToastProvider');

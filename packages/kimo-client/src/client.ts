@@ -19,9 +19,11 @@ export class KimoClient {
     path: string,
     schema: z.ZodType<T>,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<T> {
     const response = await this.request(this.base + path, {
       method: body === undefined ? 'GET' : 'POST',
+      ...(signal ? { signal } : {}),
       headers: { 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
@@ -53,10 +55,12 @@ export class KimoClient {
       s.sessionRequestSchema.parse(body),
     );
   }
-  session(id: string) {
+  session(id: string, options?: { signal?: AbortSignal }) {
     return this.json(
       `/v1/sessions/${encodeURIComponent(id)}`,
       s.sessionSnapshotSchema,
+      undefined,
+      options?.signal,
     );
   }
   async message(id: string, text: string, attachments?: string[]) {
@@ -73,11 +77,23 @@ export class KimoClient {
     if (response.status !== 202)
       throw new ApiError(response.status, await response.text());
   }
-  ops(id: string, ops: s.Op[], baseVersion: number) {
+  ops(
+    id: string,
+    ops: s.Op[],
+    baseVersion: number,
+    options?: { signal?: AbortSignal; clientMutationId?: string },
+  ) {
     return this.json(
       `/v1/sessions/${encodeURIComponent(id)}/ops`,
       s.versionResponseSchema,
-      s.opsRequestSchema.parse({ ops, baseVersion }),
+      s.opsRequestSchema.parse({
+        ops,
+        baseVersion,
+        ...(options?.clientMutationId
+          ? { clientMutationId: options.clientMutationId }
+          : {}),
+      }),
+      options?.signal,
     );
   }
   approve(id: string) {

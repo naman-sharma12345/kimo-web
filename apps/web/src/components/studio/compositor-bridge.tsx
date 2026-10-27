@@ -12,7 +12,7 @@ import {
 import { useProject } from '@/stores/project';
 import { useSession } from '@/stores/session';
 import { createFilmstripCache } from './compositor-filmstrip';
-import { useStudio, type StudioState } from '@/stores/studio';
+import { useStudio, canPlayPreview, type StudioState } from '@/stores/studio';
 import { CompositorOverlay } from './compositor-overlay';
 import {
   CompositorFullscreenControls,
@@ -20,9 +20,18 @@ import {
 } from './compositor-fullscreen';
 import styles from './compositor.module.css';
 import { maskEdgePath } from './compositor-mask-edge';
+import { previewFailure } from './preview-failure';
+import { useViewerTransform } from './viewer-transform';
+import type { EditingAPI } from '@/lib/editing/types';
+import { ViewerTextLayer } from './viewer-text-layer';
 export interface StudioCompositorHandle {
   getFilmstrip?: CompositorController['getFilmstrip'];
   getWaveform?: CompositorController['getWaveform'];
+  getAudioLevel?: CompositorController['getAudioLevel'];
+  getAudioCapabilities?: CompositorController['getAudioCapabilities'];
+  getCompareCapability?: CompositorController['getCompareCapability'];
+  setEditingTextClip?: CompositorController['setEditingTextClip'];
+  subscribeAudioLevel?: (listener: () => void) => () => void;
   event: (event: ServerEvent) => void;
   assets: (assets: readonly Asset[]) => void;
 }
@@ -39,17 +48,18 @@ function transport(state: StudioState) {
     followKimo,
     shuttle,
   } = state;
+  const playable = canPlayPreview(state.previewStatus);
   return {
-    playing,
+    playing: playing && playable,
     speed,
     volume,
     loop,
     inPoint,
     outPoint,
-    scrubbing,
-    scrubAudioEnabled,
+    scrubbing: scrubbing && playable,
+    scrubAudioEnabled: scrubAudioEnabled && playable,
     followKimo,
-    shuttle,
+    shuttle: playable ? shuttle : 0,
   };
 }
 export function observeCompositor(
@@ -85,16 +95,25 @@ export function StudioCompositor({
   assets,
   bridgeRef,
   debug = false,
+  editing,
+  onOpenText,
+  activeTextId,
+  onTextFinish,
 }: {
   project: KimoProject;
   assets: Asset[];
   bridgeRef: React.RefObject<StudioCompositorHandle | null>;
   debug?: boolean;
+  editing?: EditingAPI | null;
+  onOpenText?: (clipId: string) => void;
+  activeTextId?: string | null;
+  onTextFinish?: () => void;
 }) {
   const canvas = React.useRef<HTMLCanvasElement>(null);
   const host = React.useRef<HTMLDivElement>(null);
   const controller = React.useRef<CompositorController | null>(null);
   const lastSceneAt = React.useRef(-Infinity);
+  const audioListeners = React.useRef(new Set<() => void>());
   const lastMaskIdentity = React.useRef('');
   const reducedFade = React.useRef<Animation | null>(null);
   const initial = React.useRef({ project, assets });
@@ -107,6 +126,10 @@ export function StudioCompositor({
   const [scene, setScene] = React.useState<SceneGraph | null>(null);
   const [maskEdge, setMaskEdge] = React.useState<string | undefined>(undefined);
   const [error, setError] = React.useState('');
+  const [fatal, setFatal] = React.useState<ReturnType<
+    typeof previewFailure
+  > | null>(null);
+  const [ready, setReady] = React.useState(false);
   const [bounds, setBounds] = React.useState({ width: 1, height: 1 });
   React.useEffect(() => {
     const identity = `${overlay?.actionId ?? ''}:${overlay?.mask?.maskAssetId ?? ''}`;
@@ -145,8 +168,18 @@ export function StudioCompositor({
   const fullscreen = useStudio((s) => s.fullscreen);
   useCompositorFullscreen(host, fullscreen);
   React.useEffect(() => {
+    setReady(false);
+    setFatal(null);
+    useStudio.getState().setPreviewStatus('initializing');
     const releaseOwnership = retainCompositorMediaOwnership();
     let disposed = false;
+    const fail = (reason: unknown) => {
+      if (disposed) return;
+      const failure = previewFailure(reason);
+      setReady(false);
+      setFatal(failure);
+      useStudio.getState().setPreviewStatus(failure.status);
+    };
     let stop: (() => void) | undefined;
     const queued: ServerEvent[] = [];
     let latestAssets: readonly Asset[] = initial.current.assets;
@@ -170,7 +203,7 @@ export function StudioCompositor({
           project: initial.current.project,
           assets: latestAssets,
           filmstripCache: createFilmstripCache(
-            useSession.getState().draft?.assetLocalMap ?? {},
+            () => useSession.getState().draft?.assetLocalMap ?? {},
           ),
           renderer,
           warmup: videoCache,
@@ -191,8 +224,10 @@ export function StudioCompositor({
           reducedMotion:
             window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ??
             false,
-          onPlayback: (time, playing, fps) =>
-            useStudio.getState().publishPlayback(time, playing, fps),
+          onPlayback: (time, playing, fps) => {
+            useStudio.getState().publishPlayback(time, playing, fps);
+            for (const listener of audioListeners.current) listener();
+          },
           onMetrics: setMetrics,
           onOverlay: setOverlay,
           onEditAt: setEditAt,
@@ -214,6 +249,16 @@ export function StudioCompositor({
           assets: (next) => current.setAssets(next),
           getFilmstrip: current.getFilmstrip.bind(current),
           getWaveform: current.getWaveform.bind(current),
+          getAudioLevel: current.getAudioLevel?.bind(current),
+          getAudioCapabilities: current.getAudioCapabilities?.bind(current),
+          getCompareCapability: current.getCompareCapability?.bind(current),
+          setEditingTextClip: current.setEditingTextClip?.bind(current),
+          subscribeAudioLevel: (listener) => {
+            audioListeners.current.add(listener);
+            return () => {
+              audioListeners.current.delete(listener);
+            };
+          },
         };
         const latestProject = useProject.getState().project;
         if (latestProject?.id === initial.current.project.id)
@@ -223,21 +268,25 @@ export function StudioCompositor({
         queued.length = 0;
         try {
           await current.init(canvas.current);
-          if (!disposed && host.current)
+          if (disposed) return;
+          setReady(true);
+          useStudio.getState().setPreviewStatus('ready');
+          if (host.current)
             current.resize(
               host.current.clientWidth * window.devicePixelRatio,
               host.current.clientHeight * window.devicePixelRatio,
             );
         } catch (reason) {
-          if (!disposed)
-            setError(reason instanceof Error ? reason.message : String(reason));
+          fail(reason);
         }
       })
       .catch((reason) => {
-        if (!disposed) setError(String(reason));
+        fail(reason);
       });
     return () => {
       disposed = true;
+      useStudio.getState().requestPlayback(false);
+      useStudio.getState().setPreviewStatus('legacy');
       stop?.();
       bridgeRef.current = null;
       reducedFade.current?.cancel();
@@ -271,11 +320,15 @@ export function StudioCompositor({
     bounds.height / project.height,
   );
   const scale = zoom === 'fit' ? fit : zoom === '50%' ? 0.5 : 1;
+  React.useEffect(() => {
+    if (activeTextId) useStudio.getState().requestPlayback(false);
+  }, [activeTextId]);
+  const transformStart = useViewerTransform(editing, scale, setError);
   const geometry = {
     width: project.width * scale,
     height: project.height * scale,
   };
-  const approximate = !!error || !!metrics?.issues.length;
+  const approximate = ready && (!!error || !!metrics?.issues.length);
   return (
     <div
       ref={host}
@@ -283,10 +336,12 @@ export function StudioCompositor({
       data-testid="compositor"
       data-fullscreen={fullscreen || undefined}
       data-zoom={zoom}
-      data-rendered-frame={scene?.frame}
-      data-preparing={!scene}
+      data-rendered-frame={ready ? scene?.frame : undefined}
+      data-preview-ready={ready}
+      data-preview-status={fatal?.status ?? (ready ? 'ready' : 'initializing')}
+      data-preparing={!fatal && !scene}
     >
-      <div className={styles.surface} style={geometry}>
+      <div className={styles.surface} style={geometry} hidden={!ready}>
         <canvas
           ref={canvas}
           className={styles.canvas}
@@ -300,8 +355,46 @@ export function StudioCompositor({
           overlay={overlay}
           maskEdge={maskEdge}
           displayScale={scale}
+          onTransformStart={transformStart}
+          onEditIntent={(intent) => {
+            useStudio.setState({
+              selection: [intent.clipId],
+              inspectorCollapsed: false,
+            });
+            if (intent.kind === 'text') onOpenText?.(intent.clipId);
+          }}
         />
+        {editing && activeTextId ? (
+          <ViewerTextLayer
+            clipId={activeTextId}
+            project={project}
+            scene={controller.current?.currentScene ?? scene}
+            editing={editing}
+            displayScale={scale}
+            onTransientHide={(id, hidden) =>
+              controller.current?.setEditingTextClip(hidden ? id : null)
+            }
+            onFinish={() => onTextFinish?.()}
+          />
+        ) : null}
       </div>
+      {!ready ? (
+        <div
+          className={styles.fallback}
+          role={fatal ? 'alert' : 'status'}
+          data-testid="preview-fallback"
+        >
+          <strong>
+            {fatal ? 'Preview unavailable' : 'Initializing preview'}
+          </strong>
+          <p>
+            {fatal
+              ? 'Live preview requires a browser with an available WebGPU or WebGL GPU renderer. Check browser GPU support or use a GPU-capable browser. Timeline editing and manual seeking remain available; playback is stopped.'
+              : 'Waiting for the GPU renderer to initialize.'}
+          </p>
+          {fatal ? <pre>{fatal.details}</pre> : null}
+        </div>
+      ) : null}
       {approximate ? (
         <span
           className={styles.approx}
@@ -310,7 +403,7 @@ export function StudioCompositor({
           preview approx.
         </span>
       ) : null}
-      {editAt ? (
+      {ready && editAt ? (
         <button
           className={styles.editAt}
           onClick={() => {
@@ -321,7 +414,7 @@ export function StudioCompositor({
           edit at {new Date(editAt.time * 1000).toISOString().slice(14, 19)}
         </button>
       ) : null}
-      {debug ? (
+      {debug && ready ? (
         <output className={styles.debug} data-testid="compositor-debug">
           video rVFC presentation and renderer submission timing; GPU pixels
           unmeasured. {JSON.stringify(metrics)}

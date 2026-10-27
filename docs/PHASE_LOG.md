@@ -202,3 +202,46 @@ not inference output; existing uncorrelated mock SAM events are not silently
 assigned an action or a person label. See compositor FIDELITY, FIDELITY-RENDERER,
 RENDERER_API and mediaAPI for exact formulas, APIs and limitations. Phases 7–10
 remain unimplemented.
+
+## Phase 7 editing integration checkpoint, 2026-10-27
+
+The source now includes a shared acknowledged-version editing service, optimistic
+and draft projections, serialized commits, field-aware rebasing, soft locks,
+user-only conditional undo/redo and an unsent outbox. Actual action provenance is
+required for agent reverts. Uncertain writes are not blindly replayed. The client
+contracts document additive proposals, not production engine agreement.
+
+Timeline, inspector, inline text and caption surfaces share that editing service
+and the existing single socket. The timeline owns its one ruler/footer and uses
+bounded track canvases, visible-range media sampling, snapping and frame-based
+commands. Explicit track selection enters caption mode only for classified
+caption tracks. Registered/uploaded replacement, source bounds and local cache
+mapping use the existing upload flow rather than creating another session.
+
+Viewer text fields are mounted within the existing fullscreen surface and consume
+independent primary/secondary Pixi bounds and loaded-font metrics. Preview-only
+text suppression preserves the unfiltered scene and paired composition. Pending
+fonts or unavailable metrics do not hide the canvas text. Master-output peak/RMS
+uses the existing audio graph and playback publications, not a second context,
+clock or a gain-slider estimate. Buffered pitch preservation and isolated
+before/after grade comparison are explicitly unavailable.
+
+A repository-wide diagnostic at 03:48 UTC passed 723 tests in 61 files. Further
+replacement, measured-layout, operation-activity and synthetic lock regressions
+were added afterward. This diagnostic is not the final frozen sequential gate,
+a production build result, or full Phase 7 acceptance.
+
+### Phase 7 acceptance remains open
+
+- [ ] Rendered canvas tracks, filmstrips and waveforms plus measured 60fps scroll/zoom on a 50-clip fixture.
+- [ ] Every interaction in section 7.2 verified in the managed browser with accessible names and keyboard behavior.
+- [ ] Production soft-lock, queued-agent, per-author history and clip-lock enforcement agreement.
+- [ ] Actual viewer, timeline, inspector and caption edits verified through rendered preview and production persistence.
+- [ ] Every inspector section, including isolated before/after comparison, visually verified.
+- [ ] Assets drawer upload/drop and replacement verified end to end in the managed browser.
+- [ ] Concurrent-agent title/trim/lock/user-only-undo browser scenario completed.
+
+Phase 6 GPU validation remains environment-blocked before renderer construction
+and shader compilation. No pixel, glyph-match, A/V-sync, hardware, assistive
+technology or server-fidelity acceptance is claimed from mocked source tests.
+Phase 8 planning is read-only; Phases 8 through 10 are not implemented yet.

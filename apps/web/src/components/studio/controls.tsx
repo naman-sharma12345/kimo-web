@@ -43,6 +43,14 @@ export function Resizer({
   const origin = React.useRef<{ coordinate: number; size: number } | null>(
     null,
   );
+  // Match the server and first client render; viewport reads belong after hydration.
+  const [viewportHeight, setViewportHeight] = React.useState(1080);
+  React.useEffect(() => {
+    const resize = () => setViewportHeight(window.innerHeight);
+    resize();
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, []);
   const horizontal = panel !== 'timeline';
   function change(size: number) {
     const current = useStudio.getState();
@@ -93,7 +101,7 @@ export function Resizer({
           ? panel === 'agent'
             ? 480
             : 420
-          : Math.max(200, windowHeight() * 0.6)
+          : Math.max(200, viewportHeight * 0.6)
       }
       className={`studio-resizer studio-resizer-${panel}`}
       onDoubleClick={reset}
@@ -134,7 +142,4 @@ export function Resizer({
       }}
     />
   );
-}
-function windowHeight() {
-  return typeof window === 'undefined' ? 1080 : window.innerHeight;
 }

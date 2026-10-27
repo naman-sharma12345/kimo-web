@@ -31,6 +31,114 @@ async function setup(
   };
 }
 describe('mock HTTP and websocket integration', () => {
+  it('the synthetic agent respects a locked clip and resumes changes only after explicit unlock', async () => {
+    const app = await setup();
+    try {
+      const session = await app.client.createSession({
+        prompt: 'edit',
+        assetIds: [],
+        aspect: 'auto',
+      });
+      await app.client.ops(
+        session.sessionId,
+        [
+          {
+            op: 'track.add',
+            track: {
+              id: 'v',
+              kind: 'video',
+              name: 'V1',
+              height: 88,
+              hidden: false,
+              muted: false,
+              locked: false,
+            },
+          },
+          {
+            op: 'clip.add',
+            clip: {
+              id: 'locked',
+              kind: 'video',
+              trackId: 'v',
+              assetId: 'synthetic',
+              start: 0,
+              duration: 4,
+              in: 0,
+              speed: 1,
+              transform: { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 },
+              effects: [],
+              keyframes: [],
+              locked: true,
+            },
+          },
+        ],
+        0,
+      );
+      await app.client.message(session.sessionId, 'slower');
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const locked = await app.client.session(session.sessionId);
+      expect(locked.project.version).toBe(1);
+      expect(locked.project.clips.locked).toMatchObject({
+        duration: 4,
+        speed: 1,
+        locked: true,
+      });
+      await app.client.ops(
+        session.sessionId,
+        [{ op: 'clip.update', id: 'locked', patch: { locked: false } }],
+        1,
+      );
+      await app.client.message(session.sessionId, 'slower');
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(
+        (await app.client.session(session.sessionId)).project.clips.locked,
+      ).toMatchObject({ duration: 5, speed: 0.8, locked: false });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('attaches only completed upload IDs to the same session, deduplicates them, and never creates a second project', async () => {
+    const app = await setup();
+    try {
+      const session = await app.client.createSession({
+        prompt: 'edit',
+        assetIds: [],
+        aspect: 'auto',
+      });
+      const { uploads } = await app.client.uploads([
+        { name: 'new.mp4', size: 3, mime: 'video/mp4' },
+      ]);
+      const upload = uploads[0];
+      if (!upload) throw new Error('missing upload');
+      await expect(
+        app.client.message(session.sessionId, '', [upload.assetId]),
+      ).rejects.toMatchObject({ status: 400 });
+      expect((await app.client.session(session.sessionId)).assets).toHaveLength(
+        0,
+      );
+      expect(
+        (await fetch(upload.putUrl, { method: 'PUT', body: 'abc' })).status,
+      ).toBe(200);
+      await app.client.message(session.sessionId, '', [
+        upload.assetId,
+        upload.assetId,
+      ]);
+      await app.client.message(session.sessionId, '', [upload.assetId]);
+      const restored = await app.client.session(session.sessionId);
+      expect(restored.project.id).toBe(session.sessionId);
+      expect(restored.project.version).toBe(0);
+      expect(restored.assets.map((asset) => asset.id)).toEqual([
+        upload.assetId,
+      ]);
+      expect(await (await fetch(restored.assets[0]?.url ?? '')).text()).toBe(
+        'abc',
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it('persists uploaded bytes, rejects incomplete assets, enforces versions and completes render', async () => {
     const app = await setup();
     try {
@@ -142,6 +250,26 @@ describe('mock HTTP and websocket integration', () => {
         events.push(serverEventSchema.parse(JSON.parse(raw.toString()))),
       );
       await waitFor((e) => e.t === 'agent.message' && e.kind === 'ask_review');
+      const maskEvent = events.find((event) => event.t === 'sam.mask');
+      if (!maskEvent || maskEvent.t !== 'sam.mask')
+        throw new Error('missing mask event');
+      const maskAction = events.find(
+        (event) =>
+          event.t === 'agent.action.start' && event.id === maskEvent.actionId,
+      );
+      expect(maskAction).toMatchObject({
+        tool: 'sam_mask',
+        target: {
+          clipId: 'c2',
+          coordinateSpace: 'source_uv',
+          subjectLabel: 'synthetic ellipse',
+        },
+      });
+      expect(maskEvent.subjectLabel).toBe('synthetic ellipse');
+      if (!maskAction) throw new Error('missing correlated mask action');
+      expect(events.indexOf(maskAction)).toBeLessThan(
+        events.indexOf(maskEvent),
+      );
       expect(events.filter((e) => e.t === 'agent.action.start')).toHaveLength(
         45,
       );

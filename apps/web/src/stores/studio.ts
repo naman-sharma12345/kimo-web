@@ -77,7 +77,15 @@ export function readPreferences(userKey: string): StudioPreferences {
     return defaults();
   }
 }
+export type PreviewStatus =
+  'legacy' | 'initializing' | 'ready' | 'unavailable' | 'error';
+export function canPlayPreview(status: PreviewStatus): boolean {
+  return status === 'legacy' || status === 'ready';
+}
 export interface StudioState extends StudioPreferences {
+  previewStatus: PreviewStatus;
+  setPreviewStatus: (status: PreviewStatus) => void;
+  requestPlayback: (playing: boolean, shuttle?: number) => void;
   sessionId: string;
   agent: AgentState;
   actionIds: string[];
@@ -132,6 +140,19 @@ export interface StudioState extends StudioPreferences {
 }
 export const useStudio = create<StudioState>((set, get) => ({
   ...defaults(),
+  previewStatus: 'legacy',
+  setPreviewStatus: (previewStatus) =>
+    set({
+      previewStatus,
+      ...(!canPlayPreview(previewStatus)
+        ? { playing: false, shuttle: 0, previewFps: null }
+        : {}),
+    }),
+  requestPlayback: (playing, shuttle = 0) =>
+    set({
+      playing: playing && canPlayPreview(get().previewStatus),
+      shuttle: canPlayPreview(get().previewStatus) ? shuttle : 0,
+    }),
   sessionId: '',
   agent: 'idle',
   actionIds: [],
@@ -171,7 +192,11 @@ export const useStudio = create<StudioState>((set, get) => ({
       seekRevision: get().seekRevision + 1,
     }),
   publishPlayback: (playhead, playing, previewFps) =>
-    set({ playhead, playing, previewFps }),
+    set(
+      canPlayPreview(get().previewStatus)
+        ? { playhead, playing, previewFps }
+        : { playing: false, previewFps: null },
+    ),
   playing: false,
   playhead: 0,
   duration: 0,
@@ -191,6 +216,8 @@ export const useStudio = create<StudioState>((set, get) => ({
   resetSession: (sessionId, duration, hasOps, reviewRequested) =>
     set({
       sessionId,
+      previewStatus: 'legacy',
+      shuttle: 0,
       duration,
       hasOps,
       reviewRequested,

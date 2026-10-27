@@ -1066,3 +1066,89 @@ describe('mock 0.3-second pairs and split-transition preservation', () => {
     expect(buildScene(discontinuous, 10, opts).transitionPairs).toHaveLength(1);
   });
 });
+
+describe('Phase 7 renderer consumer fields', () => {
+  it('keeps ordered enabled effects, ignores disabled transforms and filters, and carries project RGBA', () => {
+    const c = clip('c', {
+      effects: [
+        {
+          id: 'offzoom',
+          kind: 'zoom_punch_in',
+          enabled: false,
+          params: { scale: 2 },
+        },
+        { id: 'off', kind: 'blur', enabled: false, params: { radius: 10 } },
+        { id: 'on', kind: 'grain', enabled: true, params: { amount: 0.3 } },
+        { id: 'legacy', kind: 'vignette', params: { strength: 0.5 } },
+      ],
+    });
+    const p = {
+      ...project([c]),
+      background: [0.2, 0.3, 0.4, 0.5] as [number, number, number, number],
+    };
+    const scene = buildScene(p, 3, options);
+    expect(scene.background).toEqual([0.2, 0.3, 0.4, 0.5]);
+    expect(scene.layers[0]?.effects.map((e) => e.id)).toEqual(['on', 'legacy']);
+    expect(scene.layers[0]?.transform.scale).toBe(1);
+    expect(p.clips.c?.effects).toHaveLength(4);
+  });
+  it.each(['none', 'fade', 'rise', 'type on', 'pop words'] as const)(
+    'consumes %s using the preserved animation clock',
+    (animation) => {
+      const c = clip('text', {
+        kind: 'text',
+        start: 0,
+        speed: 1,
+        text: { style: 'caption-clean', content: 'abcdef', animation },
+        animationOffsetSec: 0.1,
+      });
+      const resolved = buildScene(project([c]), 0, options).layers[0];
+      expect(resolved?.text?.content).toBe(
+        animation === 'type on' ? 'abc' : 'abcdef',
+      );
+      expect(resolved?.opacity).toBeCloseTo(
+        animation === 'fade' || animation === 'rise' ? 0.4 : 0.8,
+        12,
+      );
+      expect(resolved?.transform.y).toBe(animation === 'rise' ? 12 : 0);
+    },
+  );
+  it('multiplies raw audio fades once and honors duckUnderVoice=false in scene metadata', () => {
+    const music = clip('music', {
+      kind: 'audio',
+      start: 0,
+      speed: 1,
+      duration: 10,
+      audioRole: 'music',
+      volume: 0.5,
+      fadeInSec: 2,
+      duckUnderVoice: false,
+    });
+    const voice = clip('voice', {
+      kind: 'audio',
+      start: 0,
+      speed: 1,
+      audioRole: 'voice',
+    });
+    const scene = buildScene(project([music, voice]), 1, {
+      ...options,
+      masterVolume: 0.5,
+    });
+    expect(scene.audio.find((a) => a.clipId === 'music')).toMatchObject({
+      gain: 0.125,
+      duckGain: 1,
+    });
+  });
+});
+
+it('ignores a muted solo track for audio gating just like the raw engine', () => {
+  const scene = buildScene(
+    project(
+      [clip('music', { kind: 'audio', audioRole: 'music' })],
+      [track('v'), track('muted', { solo: true, muted: true })],
+    ),
+    3,
+    options,
+  );
+  expect(scene.audio[0]?.muted).toBe(false);
+});

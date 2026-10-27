@@ -6,7 +6,12 @@ import type {
 } from '@kimo/client';
 import { TimelineClock } from './clock';
 import { MediaPool } from './media-pool';
-import { AudioEngine } from './audio-engine';
+import {
+  AudioEngine,
+  audioCapabilities,
+  type AudioLevels,
+  type AudioCapabilities,
+} from './audio-engine';
 import {
   FilmstripService,
   FilmstripWorkerEncoder,
@@ -75,6 +80,14 @@ export interface ActionOverlay {
   target?: Extract<ServerEvent, { t: 'agent.action.start' }>['target'];
   mask?: Extract<ServerEvent, { t: 'sam.mask' }>;
   ended: boolean;
+}
+/** Structural, type-only bridge seam. No second controller/renderer is required. */
+export interface ControllerPreviewAPI {
+  readonly currentScene: SceneGraph | null;
+  setEditingTextClip(clipId: string | null): void;
+  getAudioLevel(): AudioLevels;
+  getAudioCapabilities(clipId: string): AudioCapabilities;
+  getCompareCapability(): { available: false; reason: string };
 }
 export interface ControllerOptions {
   project: KimoProject;
@@ -152,7 +165,7 @@ const initialTransport: TransportState = {
   shuttle: 0,
 };
 /** Sole animation-loop owner. React receives transport/telemetry at most ten times per second. */
-export class CompositorController {
+export class CompositorController implements ControllerPreviewAPI {
   private project: KimoProject;
   private assets: Record<string, Asset> = {};
   private readonly renderer: ControllerOptions['renderer'];
@@ -168,6 +181,8 @@ export class CompositorController {
   readonly dirtyClipIds = new Set<string>();
   private disposed = false;
   private ready = false;
+  private editingTextClip: string | null = null;
+  private publishedScene: SceneGraph | null = null;
   private raf: number | null = null;
   private preparing = false;
   private renderInFlight = false;
@@ -316,6 +331,28 @@ export class CompositorController {
   }
   get debug(): ControllerMetrics {
     return { ...this.metrics, issues: [...this.metrics.issues] };
+  }
+  /** Last coherently submitted unfiltered scene, retained while a text visual is hidden. */
+  get currentScene(): SceneGraph | null {
+    return this.publishedScene;
+  }
+  getAudioLevel(): AudioLevels {
+    return this.audio.getLevels();
+  }
+  getAudioCapabilities(clipId: string): AudioCapabilities {
+    return audioCapabilities(this.project.clips[clipId]?.kind ?? 'unknown');
+  }
+  getCompareCapability(): { available: false; reason: string } {
+    return {
+      available: false,
+      reason: 'Isolated before/after grade composition is not implemented',
+    };
+  }
+  /** Preview-only suppression; published scene remains measurable and no op is produced. */
+  setEditingTextClip(clipId: string | null): void {
+    if (this.disposed || clipId === this.editingTextClip) return;
+    this.editingTextClip = clipId;
+    this.invalidate();
   }
   markIngress(): void {
     this.ingress = this.now();
@@ -865,7 +902,36 @@ export class CompositorController {
       );
       if (!current()) return;
       this.renderInFlight = true;
-      const rendered = await this.renderer.render(scene);
+      const hidden = this.editingTextClip;
+      const renderScene = hidden
+        ? {
+            ...scene,
+            layers: scene.layers.filter(
+              (layer) => !(layer.clipId === hidden && layer.kind === 'text'),
+            ),
+            excludedTextPairs: scene.layers.flatMap((layer, index) =>
+              layer.clipId === hidden &&
+              layer.kind === 'text' &&
+              layer.transitionPairId
+                ? [
+                    {
+                      layer: {
+                        ...layer,
+                        text: undefined,
+                        assetId: undefined,
+                        mask: undefined,
+                        effects: [],
+                        opacity: 0,
+                        approximations: [],
+                      },
+                      index,
+                    },
+                  ]
+                : [],
+            ),
+          }
+        : scene;
+      const rendered = await this.renderer.render(renderScene);
       this.renderInFlight = false;
       if (!current()) return;
       rendered.approximations.forEach((value) => this.issue(value.reason));
@@ -896,8 +962,10 @@ export class CompositorController {
                   role: 'mask',
                 })),
           )
-        )
+        ) {
+          this.publishedScene = scene;
           this.options.onScene?.(scene);
+        }
       }
       if (rendered.retained)
         this.issue('retaining last good frame while resources prepare');
@@ -976,6 +1044,8 @@ export class CompositorController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.publishedScene = null;
+    this.editingTextClip = null;
     this.revision++;
     if (this.raf !== null) this.cancelFrame(this.raf);
     this.raf = null;

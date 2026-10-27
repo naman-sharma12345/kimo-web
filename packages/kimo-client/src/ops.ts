@@ -7,6 +7,9 @@ export function applyOps(
   const next: KimoProject = structuredClone(project);
   for (const op of ops) {
     switch (op.op) {
+      case 'project.update':
+        Object.assign(next, structuredClone(op.patch));
+        break;
       case 'clip.add':
         next.clips[op.clip.id] = structuredClone(op.clip);
         break;
@@ -57,6 +60,11 @@ export function applyOps(
       case 'track.add':
         next.tracks.push(structuredClone(op.track));
         break;
+      case 'track.remove':
+        if (Object.values(next.clips).some((clip) => clip.trackId === op.id))
+          throw new Error('Only empty tracks can be removed');
+        next.tracks = next.tracks.filter((track) => track.id !== op.id);
+        break;
       case 'track.update': {
         const t = next.tracks.find((t) => t.id === op.id);
         if (t) Object.assign(t, structuredClone(op.patch));
@@ -64,7 +72,12 @@ export function applyOps(
       }
       case 'text.update': {
         const c = next.clips[op.clipId];
-        if (c?.text) c.text.content = op.content;
+        if (c?.text) {
+          c.text.content = op.content;
+          if (op.words !== undefined) c.text.words = structuredClone(op.words);
+          if (op.secondaryContent !== undefined)
+            c.text.secondaryContent = op.secondaryContent;
+        }
         break;
       }
       case 'effect.set': {

@@ -1,6 +1,12 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
 import { inflateSync } from 'node:zlib';
+import { readFileSync } from 'node:fs';
+import {
+  editorLut,
+  gradeSample,
+  lutNames,
+} from '../../../scripts/editor-luts.mjs';
 import { identityLut, syntheticMask } from '../../../scripts/fixture-png.mjs';
 
 function decode(png: Buffer) {
@@ -50,4 +56,35 @@ describe('original compositor fixtures', () => {
     expect(lut.rgb(511, 511)).toEqual([255, 255, 255]);
     expect(identityLut()).toEqual(identityLut());
   });
+});
+
+describe('authored frontend LUT resources (not GPU evidence)', () => {
+  it.each(lutNames)(
+    'ships reproducible 512px atlas %s with correct 64-cube tile order',
+    (name) => {
+      const expected = editorLut(name);
+      expect(
+        readFileSync(
+          new URL(`../../../apps/web/public/luts/${name}.png`, import.meta.url),
+        ),
+      ).toEqual(expected);
+      const lut = decode(expected);
+      expect([lut.width, lut.height]).toEqual([512, 512]);
+      for (const [r, g, b] of [
+        [0, 0, 0],
+        [63, 63, 63],
+        [31, 7, 12],
+        [4, 52, 40],
+      ]) {
+        if (r === undefined || g === undefined || b === undefined)
+          throw new Error('bad sample');
+        const expectedRgb = gradeSample(name, r / 63, g / 63, b / 63).map(
+          (value) => Math.round(value * 255),
+        );
+        expect(lut.rgb((b % 8) * 64 + r, Math.floor(b / 8) * 64 + g)).toEqual(
+          expectedRgb,
+        );
+      }
+    },
+  );
 });

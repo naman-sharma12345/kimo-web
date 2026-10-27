@@ -1,6 +1,6 @@
 'use client';
 import * as React from 'react';
-import { useStudio } from '@/stores/studio';
+import { useStudio, canPlayPreview } from '@/stores/studio';
 import { timecode } from './transport';
 import styles from './compositor.module.css';
 /** Fullscreen styles never change the host/child keys or create a second canvas/context. */
@@ -153,7 +153,10 @@ export function CompositorFullscreenControls() {
           }}
         />
       </label>
-      <button onClick={() => useStudio.setState({ playing: !state.playing })}>
+      <button
+        disabled={!canPlayPreview(state.previewStatus)}
+        onClick={() => state.requestPlayback(!state.playing)}
+      >
         {state.playing ? 'pause preview' : 'play preview'}
       </button>
       <span>{timecode(state.playhead)}</span>

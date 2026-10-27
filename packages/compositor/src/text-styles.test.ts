@@ -111,3 +111,80 @@ describe('eight in-video text styles', () => {
     ).toBe(56);
   });
 });
+
+describe('Phase 7 custom text proposals', () => {
+  it('resolves size, source RGBA, alignment and top without mutating canonical defaults', () => {
+    const text = resolveText(
+      {
+        style: 'title',
+        content: 'multiline\ntext',
+        fontSize: 80,
+        alignment: 'right',
+        color: [1, 0.5, 0, 0.25],
+        position: 'top',
+      },
+      0,
+      1920,
+      1080,
+    );
+    expect(text.style).toMatchObject({
+      fontSize: 80,
+      alignment: 'right',
+      fill: 'rgba(255, 128, 0, 0.25)',
+    });
+    expect(text).toMatchObject({
+      verticalAnchor: 'top',
+      anchor: { x: 960, y: 54 },
+    });
+    expect(textStyles['title-serif'].fontSize).toBe(120);
+    expect(textStyles['title-serif'].fill).toBe('#FFFFFF');
+  });
+  it('bounds type-on by visible content and never renders old full timed words', () => {
+    const text = {
+      style: 'caption-pop' as const,
+      content: 'new content',
+      animation: 'type on' as const,
+      words: [{ w: 'old', t: 0, d: 2 }],
+    };
+    expect(resolveText(text, 0, 1920, 1080)).toMatchObject({
+      content: '',
+      words: [],
+    });
+    expect(resolveText(text, 0.1, 1920, 1080)).toMatchObject({
+      content: 'NEW',
+      words: [],
+    });
+    expect(resolveText(text, 10000, 1920, 1080).content).toBe('NEW CONTENT');
+  });
+  it('pop words explicitly enables active colour on a non-pop style using supplied timings', () => {
+    const text = resolveText(
+      {
+        style: 'caption-clean',
+        content: 'first next',
+        animation: 'pop words',
+        words: [
+          { w: 'first', t: 0, d: 1 },
+          { w: 'next', t: 1, d: 1 },
+        ],
+      },
+      1,
+      1920,
+      1080,
+    );
+    expect(text.style.activeWordColor).toBe('#FFD84D');
+    expect(text.words.map((w) => w.active)).toEqual([false, true]);
+  });
+});
+
+it('animates untimed pop words from content rather than leaving the override inert', () => {
+  const text = resolveText(
+    { style: 'title', content: 'one two', animation: 'pop words' },
+    0.15,
+    1920,
+    1080,
+  );
+  expect(text.words.map((w) => [w.text, w.active])).toEqual([
+    ['one', false],
+    ['two', true],
+  ]);
+});

@@ -4,6 +4,25 @@ import { useRouter } from 'next/navigation';
 import type { ClientEvent, SessionSnapshot } from '@kimo/client';
 import { api } from '@/lib/api';
 import { useProject } from '@/stores/project';
+import { useEditing } from '@/stores/editing';
+import { TimelineEditor, type TimelineInlineTextProps } from './timeline';
+import { TimelineTextEditor, isCaptionClip } from './text-editing';
+import { InspectorEditor, type LevelMeterAPI } from './inspector';
+import { useUploads } from '@/lib/uploads';
+import { useSession } from '@/stores/session';
+import { attachSessionUploads } from './session-upload';
+import { withBuiltinAssets, builtinLutIds } from './builtin-assets';
+import { copyClips, pasteClips, type ClipClipboard } from './edit-clipboard';
+import { addTextAtPlayhead } from './add-text-command';
+import { ReplaceMediaDialog } from './replace-media-dialog';
+import { actionProperties } from './action-properties';
+import type { PropertyActivity } from './inspector';
+import {
+  deleteClips,
+  duplicateClips,
+  splitClips,
+} from '@/lib/editing/commands';
+import { useOptionalToast } from '@/components/ui/toast';
 import {
   useStudio,
   readPreferences,
@@ -53,6 +72,19 @@ export interface StudioShellProps {
   /** Lets a later phase own the live subscription without opening a duplicate socket. */
   subscribe?: boolean;
 }
+function TimelineTextAdapter({
+  clip,
+  editing,
+  onClose,
+}: TimelineInlineTextProps) {
+  return (
+    <TimelineTextEditor
+      clip={clip}
+      editing={editing}
+      onFinish={() => onClose()}
+    />
+  );
+}
 const emptySlots: StudioSlots = {};
 const emptyCommands: NonNullable<StudioShellProps['commands']> = {};
 export const studioTiming = {
@@ -71,27 +103,63 @@ export function StudioShell({
 }: StudioShellProps) {
   const router = useRouter();
   const state = useStudio();
+  const editingState = useEditing((s) => s.state);
+  const editingSession = useEditing((s) => s.session);
+  const toasts = useOptionalToast();
+  const toastRef = React.useRef(toasts);
+  toastRef.current = toasts;
   const storedProject = useProject((s) => s.project);
   const project =
     storedProject?.id === snapshot.project.id
       ? storedProject
       : snapshot.project;
   const [assets, setAssets] = React.useState(snapshot.assets);
+  const rendererAssets = React.useMemo(
+    () => (slots.viewer ? assets : withBuiltinAssets(assets)),
+    [assets, slots.viewer],
+  );
   const [viewport, setViewport] = React.useState({ width: 1920, height: 1080 });
   const [watchTab, setWatchTab] = React.useState('chat');
   const [agentTab, setAgentTab] = React.useState('chat');
   const [banner, setBanner] = React.useState(true);
   const [help, setHelp] = React.useState(false);
   const [boundary, setBoundary] = React.useState('');
+  const [activity, setActivity] = React.useState('');
+  const [activeClipId, setActiveClipId] = React.useState<string | null>(null);
+  const [propertyActivity, setPropertyActivity] = React.useState<
+    readonly PropertyActivity[]
+  >([]);
+  const [agentChange, setAgentChange] = React.useState<
+    { id: string; ops: readonly import('@kimo/client').Op[] } | undefined
+  >(undefined);
+  const [timelineZoom, setTimelineZoom] = React.useState<number | null>(null);
+  const [replacement, setReplacement] = React.useState<{
+    clipId: string;
+    mode: 'search' | 'upload' | 'all';
+  } | null>(null);
+  const [selectedTrackId, setSelectedTrackId] = React.useState<string | null>(
+    null,
+  );
+  const [textEditingId, setTextEditingId] = React.useState<string | null>(null);
+  const clipboard = React.useRef<ClipClipboard | null>(null);
   const composer = React.useRef<HTMLTextAreaElement>(null);
   const viewer = React.useRef<HTMLElement>(null);
   const socket = React.useRef<WebSocket | null>(null);
+  const uploadLife = React.useRef<AbortController | null>(null);
   const defaultCompositor = React.useRef<StudioCompositorHandle | null>(null);
   const compositor = compositorRef ?? defaultCompositor;
   React.useEffect(() => {
     if (compositorRef) compositorRef.current?.assets(assets);
   }, [assets, compositorRef]);
   React.useEffect(() => {
+    const previousPreview = useStudio.getState();
+    const previewStatus =
+      !slots.viewer && Object.keys(snapshot.project.clips).length
+        ? previousPreview.sessionId === sessionId &&
+          previousPreview.previewStatus !== 'legacy'
+          ? previousPreview.previewStatus
+          : 'initializing'
+        : 'legacy';
     useStudio
       .getState()
       .resetSession(
@@ -100,16 +168,91 @@ export function StudioShell({
         snapshot.project.version > 0,
         snapshot.status === 'awaiting_review',
       );
+    useStudio.getState().setPreviewStatus(previewStatus);
     useStudio.setState({ actionIds: snapshot.actionIds ?? [] });
     useStudio.setState(readPreferences(userKey));
-    useProject.getState().replace(snapshot.project);
+    setSelectedTrackId(null);
+    setPropertyActivity([]);
+    setActiveClipId(null);
+    setAgentChange(undefined);
+    const uploadController = new AbortController();
+    uploadLife.current = uploadController;
+    let storage: Storage | undefined;
+    try {
+      storage = window.localStorage;
+    } catch {
+      /* Denied storage is an explicit unsaved service state. */
+    }
+    const edit = useProject.getState().attach({
+      sessionId,
+      project: snapshot.project,
+      assets: snapshot.assets,
+      client: api,
+      storage,
+      online: () => navigator.onLine,
+      assetsChanged: (next) => setAssets([...next]),
+      activity: setActivity,
+      selectionRemoved: (removed) => {
+        useStudio.setState({
+          selection: useStudio
+            .getState()
+            .selection.filter((id) => !removed.includes(id)),
+        });
+        setTextEditingId((id) => (id && removed.includes(id) ? null : id));
+      },
+      notifications: {
+        toast: (message, action) => {
+          if (toastRef.current)
+            toastRef.current.notify({
+              message,
+              action: action
+                ? { label: action.label, onClick: action.run }
+                : undefined,
+            });
+          else setBoundary(message);
+        },
+      },
+      messages: {
+        send: async (text, attachments) => {
+          await api.message(
+            sessionId,
+            text,
+            attachments ? [...attachments] : undefined,
+          );
+        },
+        prefill: (text) => {
+          if (composer.current) {
+            const setter = Object.getOwnPropertyDescriptor(
+              HTMLTextAreaElement.prototype,
+              'value',
+            )?.set;
+            setter?.call(composer.current, text);
+            composer.current.dispatchEvent(
+              new Event('input', { bubbles: true }),
+            );
+            composer.current.focus();
+          }
+        },
+      },
+    });
+    const flush = () => {
+      void edit.flush();
+    };
+    window.addEventListener('online', flush);
     setAssets(snapshot.assets);
     const resize = () =>
       setViewport({ width: window.innerWidth, height: window.innerHeight });
     resize();
     window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
-  }, [sessionId, snapshot, userKey]);
+    return () => {
+      uploadController.abort();
+      if (uploadLife.current === uploadController) uploadLife.current = null;
+      window.removeEventListener('resize', resize);
+      window.removeEventListener('online', flush);
+      if (useEditing.getState().session === edit)
+        useProject.getState().dispose();
+    };
+  }, [sessionId, snapshot, userKey, slots.viewer]);
   React.useEffect(() => {
     useStudio.setState({ duration: project.duration });
   }, [project.duration]);
@@ -130,6 +273,7 @@ export function StudioShell({
     let handshake: ReturnType<typeof setTimeout> | undefined;
     let connection: WebSocket | undefined;
     let projectQueue: Promise<void> = Promise.resolve();
+    const runningActions = new Set<string>();
     const url = snapshot.wsUrl;
     function retry() {
       clearTimeout(handshake);
@@ -155,14 +299,82 @@ export function StudioShell({
             if (event.t !== 'asset.added' && event.t !== 'project.ops')
               compositor.current?.event(event);
             useStudio.getState().receive(event);
-            if (event.t === 'asset.added')
-              setAssets((current) => [
-                ...current.filter((a) => a.id !== event.asset.id),
-                event.asset,
-              ]);
+            if (event.t === 'agent.action.start') {
+              runningActions.add(event.id);
+              if (event.target?.clipId) setActiveClipId(event.target.clipId);
+            }
+            if (event.t === 'agent.action.end') {
+              runningActions.delete(event.id);
+              setPropertyActivity((current) =>
+                current.filter((item) => item.actionId !== event.id),
+              );
+              if (!runningActions.size) setActiveClipId(null);
+            }
+            if (
+              event.t === 'project.ops' &&
+              event.actionId &&
+              runningActions.has(event.actionId)
+            ) {
+              const authority = useEditing
+                .getState()
+                .session?.getState().acknowledged;
+              if (authority) {
+                const changed = actionProperties(
+                  authority,
+                  event.ops,
+                  event.actionId,
+                );
+                setPropertyActivity((current) => [
+                  ...current.filter((item) => item.actionId !== event.actionId),
+                  ...changed,
+                ]);
+              }
+              setAgentChange({
+                id: `${event.actionId}:${event.version}`,
+                ops: event.ops,
+              });
+              const op = event.ops.find(
+                (op) =>
+                  'id' in op || op.op === 'clip.add' || op.op === 'text.update',
+              );
+              if (op) {
+                const id =
+                  op.op === 'clip.add'
+                    ? op.clip.id
+                    : op.op === 'text.update'
+                      ? op.clipId
+                      : 'id' in op
+                        ? op.id
+                        : null;
+                if (id) setActiveClipId(id);
+              }
+            }
+            if (event.t === 'asset.added') {
+              const edit = useEditing.getState().session;
+              if (edit) {
+                const authority = edit.getState();
+                edit.replaceSnapshot({
+                  project: authority.acknowledged,
+                  assets: [
+                    ...authority.assets.filter(
+                      (asset) => asset.id !== event.asset.id,
+                    ),
+                    event.asset,
+                  ],
+                });
+              } else
+                setAssets((current) => [
+                  ...current.filter((asset) => asset.id !== event.asset.id),
+                  event.asset,
+                ]);
+            }
             if (event.t === 'project.ops') {
               const current = useProject.getState().project;
-              if (current && event.version <= current.version) return;
+              if (
+                current &&
+                event.version <= useProject.getState().acknowledgedVersion
+              )
+                return;
               compositor.current?.event(event);
               // Serialize authoritative refetches with contiguous events. A refetch replaces
               // the asset registry too, and never reapplies the same op batch.
@@ -170,8 +382,16 @@ export function StudioShell({
                 .then(async () => {
                   if (disposed) return;
                   const latest = useProject.getState().project;
-                  if (latest && event.version <= latest.version) return;
-                  if (!latest || event.version !== latest.version + 1) {
+                  if (
+                    latest &&
+                    event.version <= useProject.getState().acknowledgedVersion
+                  )
+                    return;
+                  if (
+                    !latest ||
+                    event.version !==
+                      useProject.getState().acknowledgedVersion + 1
+                  ) {
                     const restored = await api.session(sessionId);
                     if (disposed) return;
                     if (restored.project.version < event.version)
@@ -181,15 +401,35 @@ export function StudioShell({
                     const newest = useProject.getState().project;
                     if (
                       newest?.id === restored.project.id &&
-                      newest.version > restored.project.version
+                      useProject.getState().acknowledgedVersion >
+                        restored.project.version
                     )
                       return;
-                    useProject.getState().replace(restored.project);
-                    setAssets(restored.assets);
-                  } else
-                    await useProject
-                      .getState()
-                      .receive(sessionId, event.version, event.ops);
+                    const edit = useEditing.getState().session;
+                    if (edit)
+                      edit.replaceSnapshot({
+                        project: restored.project,
+                        assets: restored.assets,
+                      });
+                    else {
+                      useProject.getState().replace(restored.project);
+                      setAssets(restored.assets);
+                    }
+                  } else {
+                    const editing = useEditing.getState().session;
+                    if (editing)
+                      await editing.receiveAuthoritative({
+                        version: event.version,
+                        ops: event.ops,
+                        actionId: event.actionId,
+                        author: event.author,
+                        clientMutationId: event.clientMutationId,
+                      });
+                    else
+                      await useProject
+                        .getState()
+                        .receive(sessionId, event.version, event.ops);
+                  }
                 })
                 .catch(() => {
                   if (!disposed)
@@ -299,12 +539,106 @@ export function StudioShell({
           return;
         }
         if (id === 'play') {
-          useStudio.setState({ playing: !current.playing });
+          current.requestPlayback(!current.playing);
           return;
         }
         if (id.startsWith('shuttle-')) {
           const shuttle = id === 'shuttle-j' ? -1 : id === 'shuttle-l' ? 1 : 0;
-          useStudio.setState({ shuttle, playing: shuttle !== 0 });
+          current.requestPlayback(shuttle !== 0, shuttle);
+          return;
+        }
+        if (id === 'add-text') {
+          const edit = useEditing.getState().session;
+          if (!edit) return false;
+          try {
+            const { clipId, ops } = addTextAtPlayhead(
+              edit.getState().project,
+              current.playhead,
+            );
+            void edit
+              .editGroup(ops, 'add text', 'keyboard')
+              .then((result) => {
+                if (result.status === 'failed')
+                  setBoundary(result.error ?? 'text could not be added');
+              })
+              .catch((error: unknown) =>
+                setBoundary(
+                  error instanceof Error
+                    ? error.message
+                    : 'text could not be added',
+                ),
+              );
+            useStudio.setState({ selection: [clipId] });
+            setTextEditingId(clipId);
+          } catch (error) {
+            setBoundary(
+              error instanceof Error
+                ? error.message
+                : 'text could not be added',
+            );
+          }
+          return;
+        }
+        if (
+          [
+            'edit-c',
+            'edit-v',
+            'edit-d',
+            'delete',
+            'delete-lift',
+            'split',
+          ].includes(id)
+        ) {
+          const edit = useEditing.getState().session;
+          if (!edit) return false;
+          const p = edit.getState().project;
+          if (id === 'edit-c') {
+            clipboard.current = copyClips(p, current.selection);
+            return;
+          }
+          try {
+            const ops =
+              id === 'edit-v'
+                ? clipboard.current
+                  ? pasteClips(
+                      p,
+                      clipboard.current,
+                      current.playhead,
+                      edit.getState().assets,
+                    )
+                  : []
+                : id === 'edit-d'
+                  ? duplicateClips(p, current.selection)
+                  : id === 'split'
+                    ? splitClips(p, current.selection, current.playhead)
+                    : deleteClips(p, current.selection, {
+                        lift: id === 'delete-lift',
+                      });
+            if (ops.length)
+              void edit
+                .editGroup(
+                  ops,
+                  id === 'edit-v'
+                    ? 'paste clips'
+                    : id === 'edit-d'
+                      ? 'duplicate clips'
+                      : id === 'split'
+                        ? 'split clips'
+                        : 'delete clips',
+                  'keyboard',
+                )
+                .catch((error: unknown) =>
+                  setBoundary(
+                    error instanceof Error
+                      ? error.message
+                      : 'edit could not be saved',
+                  ),
+                );
+          } catch (error) {
+            setBoundary(
+              error instanceof Error ? error.message : 'edit is unavailable',
+            );
+          }
           return;
         }
         if (id === 'frame-back')
@@ -319,8 +653,10 @@ export function StudioShell({
         else if (id === 'o') useStudio.setState({ outPoint: current.playhead });
         else if (id === 's')
           useStudio.setState({ snapping: !current.snapping });
-        else if (id === 'fit') useStudio.setState({ zoom: 1 });
-        else if (['v', 'b', 'y', 't'].includes(id))
+        else if (id === 'fit') {
+          setTimelineZoom(null);
+          useStudio.setState({ zoom: 1 });
+        } else if (['v', 'b', 'y', 't'].includes(id))
           useStudio.setState({
             tool: ({ v: 'select', b: 'blade', y: 'slip', t: 'text' } as const)[
               id as 'v' | 'b' | 'y' | 't'
@@ -329,9 +665,13 @@ export function StudioShell({
         else if (id === 'escape') {
           composer.current?.blur();
           return false;
-        } else if (id === 'undo' && commands.undo) commands.undo();
-        else if (id === 'redo' && commands.redo) commands.redo();
-        else {
+        } else if (id === 'undo') {
+          if (commands.undo) commands.undo();
+          else void useEditing.getState().session?.undoUser();
+        } else if (id === 'redo') {
+          if (commands.redo) commands.redo();
+          else void useEditing.getState().session?.redoUser();
+        } else {
           setBoundary(
             id === 'submit'
               ? 'sending connects in Phase 8'
@@ -341,6 +681,197 @@ export function StudioShell({
       }),
     [commands, pauseAgent, fullscreen, project.fps],
   );
+  const uploadFiles = async (files: readonly File[]) => {
+    const life = uploadLife.current;
+    if (!life || life.signal.aborted) return [];
+    return attachSessionUploads({
+      files,
+      queue: useUploads,
+      signal: life.signal,
+      send: (attachments) => api.message(sessionId, '', attachments),
+      refresh: () => api.session(sessionId),
+      remember: (mapping) => {
+        const draft = useSession.getState().draft;
+        useSession.getState().save({
+          sessionId,
+          prompt: originalPrompt,
+          wsUrl: snapshot.wsUrl ?? '',
+          assetLocalMap: {
+            ...(draft?.sessionId === sessionId ? draft.assetLocalMap : {}),
+            ...mapping,
+          },
+        });
+      },
+      accepted: (restored) =>
+        useEditing.getState().session?.replaceSnapshot(restored),
+    });
+  };
+  const timelineMedia = React.useMemo(
+    () =>
+      state.previewStatus === 'ready'
+        ? {
+            getFilmstrip: async (
+              clipId: string,
+              width: number,
+              signal?: AbortSignal,
+            ) => {
+              const handle = compositor.current?.getFilmstrip;
+              if (!handle) throw new Error('filmstrip source is not ready');
+              return handle(clipId, width, signal);
+            },
+            getWaveform: async (
+              clipId: string,
+              points: number,
+              signal?: AbortSignal,
+            ) => {
+              const handle = compositor.current?.getWaveform;
+              if (!handle) throw new Error('waveform source is not ready');
+              return handle(clipId, points, signal);
+            },
+          }
+        : null,
+    [compositor, state.previewStatus, sessionId, assets],
+  );
+  const outputMeter = React.useMemo<LevelMeterAPI>(
+    () =>
+      state.previewStatus === 'ready'
+        ? {
+            available: true,
+            measure: () => {
+              const level = compositor.current?.getAudioLevel?.();
+              if (!level?.available)
+                throw new Error('output analyser is unavailable');
+              return {
+                channels: [level.peak],
+                playing: level.state === 'measuring',
+              };
+            },
+            subscribe: (listener) =>
+              compositor.current?.subscribeAudioLevel?.(listener) ?? (() => {}),
+          }
+        : {
+            available: false,
+            reason:
+              'audio output meter is not available until preview initializes',
+          },
+    [state.previewStatus, compositor],
+  );
+  const captionTrackId = React.useMemo(() => {
+    if (!selectedTrackId) return undefined;
+    const clips = Object.values(project.clips).filter(
+      (clip) => clip.trackId === selectedTrackId,
+    );
+    return clips.length && clips.every(isCaptionClip)
+      ? selectedTrackId
+      : undefined;
+  }, [selectedTrackId, project]);
+  const editorSlots: StudioSlots = {
+    ...slots,
+    timelineOwnsChrome: slots.timeline
+      ? slots.timelineOwnsChrome
+      : !!(editingState && editingSession),
+    timeline:
+      slots.timeline ??
+      (editingState && editingSession ? (
+        <TimelineEditor
+          project={project}
+          assets={assets}
+          editing={editingSession}
+          editState={editingState}
+          selection={state.selection}
+          setSelection={(selection) => {
+            setSelectedTrackId(null);
+            useStudio.setState({ selection });
+          }}
+          onSelectTrack={(trackId) => {
+            setSelectedTrackId(trackId);
+            useStudio.setState({ selection: [], inspectorCollapsed: false });
+          }}
+          InlineTextEditor={TimelineTextAdapter}
+          playhead={state.playhead}
+          onSeek={state.seek}
+          onScrubStart={state.beginScrubbing}
+          onScrub={state.updateScrubbing}
+          onScrubEnd={() =>
+            useStudio.getState().endScrubbing(useStudio.getState().playhead)
+          }
+          zoom={timelineZoom}
+          onZoomChange={setTimelineZoom}
+          tool={state.tool}
+          snapping={state.snapping}
+          linked={state.linked}
+          onUpload={async (files) => {
+            await uploadFiles(files);
+          }}
+          onReplace={(clipId) => setReplacement({ clipId, mode: 'all' })}
+          onOpenText={setTextEditingId}
+          onInspect={(id) =>
+            useStudio.setState({ selection: [id], inspectorCollapsed: false })
+          }
+          onMessage={(text) => {
+            useStudio.setState({ agentCollapsed: false });
+            setAgentTab('chat');
+            setWatchTab('chat');
+            requestAnimationFrame(() => {
+              if (composer.current) {
+                const setter = Object.getOwnPropertyDescriptor(
+                  HTMLTextAreaElement.prototype,
+                  'value',
+                )?.set;
+                setter?.call(composer.current, text);
+                composer.current.dispatchEvent(
+                  new Event('input', { bubbles: true }),
+                );
+                composer.current.focus();
+              }
+            });
+          }}
+          mediaHandle={timelineMedia}
+          onTogglePlayback={() => {
+            const current = useStudio.getState();
+            current.requestPlayback(!current.playing);
+          }}
+          onError={setBoundary}
+          activeClipId={activeClipId}
+          agentChange={agentChange}
+          followKimo={state.followKimo}
+        />
+      ) : undefined),
+    inspector:
+      slots.inspector ??
+      (editingState && editingSession ? (
+        <InspectorEditor
+          project={project}
+          assets={rendererAssets}
+          editing={editingSession}
+          editState={editingState}
+          selection={state.selection}
+          playhead={state.playhead}
+          onSeek={state.seek}
+          onReplace={(clipId, mode) => setReplacement({ clipId, mode })}
+          propertyActivity={propertyActivity}
+          captionTrackId={captionTrackId}
+          lutAssets={builtinLutIds}
+          onMaskOpen={(maskSectionOpen) =>
+            useStudio.setState({ maskSectionOpen })
+          }
+          compare={{
+            available: false,
+            reason: 'before/after preview is not supported by this renderer',
+          }}
+          audioCapabilities={(clipId) =>
+            compositor.current?.getAudioCapabilities?.(clipId) ?? {
+              keepPitch: false,
+              reason: 'preview audio path is not ready',
+            }
+          }
+          levelMeter={outputMeter}
+          onMessage={async (text) => {
+            await api.message(sessionId, text);
+          }}
+        />
+      ) : undefined),
+  };
   const responsive = responsiveSizes(viewport.width);
   const sizes = Object.fromEntries(
     (['agent', 'inspector', 'timeline'] as const).map((panel) => [
@@ -375,6 +906,9 @@ export function StudioShell({
       className="studio-shell"
       style={style}
       data-ready="true"
+      data-project-save={editingState?.saveStatus}
+      data-timeline-zoom={timelineZoom ?? 'fit'}
+      data-text-editing={textEditingId ?? undefined}
       data-watch-tab={watchTab}
       data-agent-collapsed={state.agentCollapsed || undefined}
       data-inspector-collapsed={state.inspectorCollapsed || undefined}
@@ -382,11 +916,26 @@ export function StudioShell({
       aria-label="video studio"
     >
       <StudioTopBar
+        projectSave={editingState?.saveStatus}
         sessionId={sessionId}
         commands={{
           ...commands,
           pauseAgent: commands.pauseAgent ?? pauseAgent,
           fullscreen,
+          undo:
+            commands.undo ??
+            (editingState?.canUndo
+              ? () => {
+                  void editingSession?.undoUser();
+                }
+              : undefined),
+          redo:
+            commands.redo ??
+            (editingState?.canRedo
+              ? () => {
+                  void editingSession?.redoUser();
+                }
+              : undefined),
           finish:
             commands.finish ??
             (() => setBoundary('review flow connects in Phase 9')),
@@ -423,8 +972,12 @@ export function StudioShell({
                   <StudioCompositor
                     key={sessionId}
                     project={project}
-                    assets={assets}
+                    assets={rendererAssets}
                     bridgeRef={compositor}
+                    editing={editingSession}
+                    onOpenText={setTextEditingId}
+                    activeTextId={textEditingId}
+                    onTextFinish={() => setTextEditingId(null)}
                     debug={
                       typeof window !== 'undefined' &&
                       new URLSearchParams(window.location.search).get(
@@ -443,7 +996,11 @@ export function StudioShell({
                 value={sizes.inspector}
                 userKey={userKey}
               />
-              <InspectorPanel project={project} assets={assets} slots={slots} />
+              <InspectorPanel
+                project={project}
+                assets={assets}
+                slots={editorSlots}
+              />
             </>
           )}
         </div>
@@ -467,11 +1024,22 @@ export function StudioShell({
         <Resizer panel="timeline" value={sizes.timeline} userKey={userKey} />
         <TimelinePanel
           project={project}
-          slots={slots}
+          slots={editorSlots}
+          zoom={timelineZoom}
+          onZoomChange={setTimelineZoom}
           toggle={() => togglePanel('timeline')}
         />
       </div>
-      <StudioStatusBar />
+      <ReplaceMediaDialog
+        clipId={replacement?.clipId ?? null}
+        mode={replacement?.mode ?? 'all'}
+        project={project}
+        assets={assets}
+        editing={editingSession}
+        onClose={() => setReplacement(null)}
+        onUpload={uploadFiles}
+      />
+      <StudioStatusBar activity={activity} />
       <ShortcutsDialog open={help} onOpenChange={setHelp} />
       <Dialog
         open={!!boundary}

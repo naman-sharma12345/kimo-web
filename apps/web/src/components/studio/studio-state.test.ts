@@ -136,3 +136,31 @@ describe('studio shell state', () => {
     expect(timecode(3661)).toBe('01:01:01:00');
   });
 });
+
+describe('preview readiness and legacy intent', () => {
+  it('blocks playback in every non-ready renderer state without blocking manual seek or accepting stale publications', () => {
+    for (const status of ['initializing', 'unavailable', 'error'] as const) {
+      useStudio.getState().setPreviewStatus(status);
+      useStudio.getState().requestPlayback(true, -1);
+      useStudio.getState().seek(7);
+      useStudio.getState().publishPlayback(9, true, 60);
+      expect(useStudio.getState()).toMatchObject({
+        playing: false,
+        shuttle: 0,
+        playhead: 7,
+        previewFps: null,
+      });
+    }
+    useStudio.getState().setPreviewStatus('ready');
+    useStudio.getState().requestPlayback(true, 1);
+    expect(useStudio.getState()).toMatchObject({ playing: true, shuttle: 1 });
+    useStudio.getState().resetSession('next', 10, false, false);
+    expect(useStudio.getState()).toMatchObject({
+      previewStatus: 'legacy',
+      playing: false,
+      shuttle: 0,
+    });
+    useStudio.getState().requestPlayback(true);
+    expect(useStudio.getState().playing).toBe(true);
+  });
+});

@@ -39,8 +39,15 @@ describe('disposable preview boundary', () => {
       '/warmup/test-123',
       '/studio/test-123',
       '/grain.png',
+      '/luts/warm-film.png',
+      '/luts/teal-orange.png',
+      '/luts/bleach.png',
+      '/luts/mono.png',
       '/brand/kimo-mark.svg',
       '/fonts/instrument-serif-italic.ttf',
+      '/fonts/geist-sans-variable.woff2',
+      '/fonts/geist-mono-variable.woff2',
+      '/__nextjs_font/geist-latin.woff2',
       '/_next/static/chunks/app/studio/[sessionId]/page.js?x=1',
     ])
       expect(route(path)).not.toBeNull();
@@ -60,6 +67,16 @@ describe('disposable preview boundary', () => {
       '/studio/a%2fb',
       '//example.com',
       '/fonts/../../.env',
+      '/fonts/%2e%2e/.env',
+      '/fonts/unknown.woff2',
+      '/luts/unknown.png',
+      '/luts/../../.env',
+      '/luts/%2e%2e/.env',
+      '/__nextjs_font/anything',
+      '/__nextjs_font/geist-latin.woff2/extra',
+      '/__nextjs_font/../.env',
+      '/__nextjs_font/%2e%2e/.env',
+      '/__nextjs_launch-editor',
       '/_next/static/.secret',
       '/mock-api/health/../admin',
     ])
@@ -287,6 +304,88 @@ describe('HTTP body ceiling', () => {
       gateway.close();
       sink.closeAllConnections();
       await new Promise<void>((accept) => sink.close(() => accept()));
+    }
+  });
+});
+
+describe('exact public and installed Next overlay font routes', () => {
+  it('forwards only legitimate font paths and verifies real upstream overlay WOFF2 bytes', async () => {
+    const { createRequire } = await import('node:module');
+    const { readFileSync } = await import('node:fs');
+    const webRequire = createRequire(
+      new URL('../../../apps/web/package.json', import.meta.url),
+    );
+    const { getDevOverlayFontMiddleware } = webRequire(
+      'next/dist/next-devtools/server/font/get-dev-overlay-font-middleware.js',
+    ) as {
+      getDevOverlayFontMiddleware: () => (
+        req: http.IncomingMessage,
+        res: http.ServerResponse,
+        next: () => void,
+      ) => Promise<void>;
+    };
+    const middleware = getDevOverlayFontMiddleware();
+    const fonts = new Map(
+      [
+        '/fonts/geist-sans-variable.woff2',
+        '/fonts/geist-mono-variable.woff2',
+      ].map((path) => [
+        path,
+        readFileSync(
+          new URL(`../../../apps/web/public${path}`, import.meta.url),
+        ),
+      ]),
+    );
+    const seen: string[] = [];
+    const frontend = http.createServer((req, res) => {
+      seen.push(req.url ?? '');
+      void middleware(req, res, () => {
+        const bytes = fonts.get(req.url ?? '');
+        if (bytes)
+          res.writeHead(200, { 'content-type': 'font/woff2' }).end(bytes);
+        else res.writeHead(404).end();
+      });
+    });
+    const gateway = createGateway('https://synthetic.trycloudflare.com');
+    frontend.listen(3106, '127.0.0.1');
+    await once(frontend, 'listening');
+    gateway.server.listen(0, '127.0.0.1');
+    await once(gateway.server, 'listening');
+    try {
+      const address = gateway.server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('missing address');
+      for (const path of [
+        ...fonts.keys(),
+        '/__nextjs_font/geist-latin.woff2',
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${address.port}${path}`);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')).toBe('font/woff2');
+        const bytes = Buffer.from(await response.arrayBuffer());
+        expect(bytes.subarray(0, 4).toString()).toBe('wOF2');
+        if (fonts.has(path)) expect(bytes).toEqual(fonts.get(path));
+      }
+      const forwarded = seen.length;
+      const denied = await fetch(
+        `http://127.0.0.1:${address.port}/__nextjs_font/private.woff2`,
+      );
+      expect(denied.status).toBe(404);
+      expect(seen).toHaveLength(forwarded);
+      expect(
+        readFileSync(
+          new URL(
+            '../../../apps/web/public/fonts/geist-OFL.txt',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ).toContain('SIL OPEN FONT LICENSE Version 1.1');
+    } finally {
+      gateway.close();
+      await new Promise<void>((done, reject) =>
+        frontend.close((error) => (error ? reject(error) : done())),
+      );
     }
   });
 });

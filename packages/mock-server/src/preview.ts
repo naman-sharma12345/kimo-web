@@ -53,10 +53,18 @@ export function route(raw: string, method = 'GET') {
         /^\/_next\/static\/[a-zA-Z0-9_./[\]@()-]+$/.test(target) ||
         [
           '/grain.png',
+          '/luts/warm-film.png',
+          '/luts/teal-orange.png',
+          '/luts/bleach.png',
+          '/luts/mono.png',
           '/icon.svg',
           '/brand/kimo-mark.svg',
           '/fonts/instrument-serif-italic.ttf',
           '/fonts/anton-regular.ttf',
+          // Exact Next 15 overlay font, verified by installed upstream middleware test.
+          '/__nextjs_font/geist-latin.woff2',
+          '/fonts/geist-sans-variable.woff2',
+          '/fonts/geist-mono-variable.woff2',
           '/fonts/dm-serif-display-regular.ttf',
         ].includes(target));
   return allowed

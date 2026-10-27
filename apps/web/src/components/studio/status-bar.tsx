@@ -9,7 +9,7 @@ import {
 import { Spinner } from '@/components/ui/spinner';
 import { Row } from '@/components/ui/row';
 import { useStudio } from '@/stores/studio';
-export function StudioStatusBar() {
+export function StudioStatusBar({ activity }: { activity?: string } = {}) {
   const state = useStudio();
   const [seconds, setSeconds] = React.useState(0);
   React.useEffect(() => {
@@ -44,6 +44,11 @@ export function StudioStatusBar() {
         <i>·</i>
         <span title="time in this studio visit">session {elapsed}</span>
       </div>
+      {activity ? (
+        <span className="studio-system-activity" role="status" title={activity}>
+          {activity}
+        </span>
+      ) : null}
       <Popover>
         <PopoverTrigger asChild>
           <Button variant="ghost" size="xs" className="studio-connection">

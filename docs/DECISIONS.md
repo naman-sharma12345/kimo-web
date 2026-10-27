@@ -65,3 +65,21 @@ Repeated execution restarts destroyed local disposable-preview processes before 
   the last submitted frame. Explicit media sample descriptors prevent double
   application of clip speed and mask timeOrigin, and hold missing transition
   handles at the actual boundary with rate zero.
+
+## Phase 7 integration choices, 2026-10-27
+
+- The timeline editor owns one ruler, visible track canvases, minimap and assets drawer. The older shell ruler/footer are not rendered around this slot. Timeline zoom is real pixels/second in the specified 4 to 600 range; null selects fit.
+- The four named LUT options have no supplied numerical transforms or engine preset IDs. Original deterministic sRGB 64-cube atlases are authored in `scripts/editor-luts.mjs` and checked byte-for-byte against shipped `/luts/*.png`. They are frontend creative looks, not replicas of undocumented engine presets. IDs use a `kimo-local-lut-` namespace and register as actual typed image assets. GPU sampling and backend resolution of these public resources remain acceptance boundaries.
+- Upload more uses the existing upload queue, then a single existing messages request with attachment IDs and an empty text. It does not create a second session or synthesize an agent instruction. The mock validates completed uploads, deduplicates IDs and emits actual asset.added events. Production acceptance requires the existing engine to associate those attachments; the frontend explicitly reports an unconfirmed association rather than inventing it. An uncertain request is never replayed.
+- The project-save indicator reads the transaction service state independently of the locally saved title. Unknown delivery or unavailable browser storage is not labeled saved.
+
+- Editor copy/paste uses a session-only immutable clip snapshot and fresh clip/effect/link IDs, with paste positioned at the playhead and validated against current unlocked compatible tracks. It never overwrites the system clipboard. Timeline-local keyboard handlers consume their gestures before the single global handler, preventing duplicate batches.
+
+- Timeline extraction is gated on actual preview readiness. Its handle identity stays stable across playhead updates, but changes with session, registry or readiness, so visible-cache entries are not discarded every playback frame or filled with pre-initialization empty results.
+- Viewer text-handle drags reuse measured overlay geometry and the same editing transaction. Screen movement is divided by the actual display scale; rotation and scaling use the transformed anchor. Pure geometry and mocked lifecycle tests do not establish rendered typography or GPU fidelity. A 0.01 scale floor prevents invalid zero-scale operations.
+
+- Replacement media uses actual registered sources or one confirmed upload in the existing session. Same-kind media are required. Placement and styling are retained, source time and duration are clamped to verified replacement headroom and whole-frame bounds, and source-specific masks are discarded atomically. Missing duration is an explicit boundary, not an invented length. Search mode currently filters already-registered web assets; it does not claim a new stock-search provider request.
+- Locally probed upload duration and dimensions fill only missing frontend asset metadata after the server confirms attachment. They are not presented as server-persisted metadata, and a later server snapshot may correctly return unknown metadata.
+- In-place viewer editing uses separate primary/secondary Pixi glyph bounds and actual resolved font metrics. Only a ready registered font can hide the canvas layer. Font-pending or failed metrics keep the preview visible and expose a read-only status. The editor remains inside the existing fullscreen surface.
+- Inspector activity comes only from changed property leaves in operation packets correlated to a currently running action. Identical patches do not create activity; ending the action clears it. No action authorship is inferred from equal operation contents.
+- Synthetic agent operations now reject a complete batch that touches locked clips or tracks, and report the actual action failure. This is mock-producer enforcement for deterministic frontend tests, not evidence of production-engine locking or permission agreement.

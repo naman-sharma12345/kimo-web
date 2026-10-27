@@ -44,6 +44,7 @@ export function CompositorOverlay({
   overlay,
   maskEdge,
   onEditIntent,
+  onTransformStart,
   displayScale,
 }: {
   project: KimoProject;
@@ -52,6 +53,11 @@ export function CompositorOverlay({
   overlay: ActionOverlay | null;
   maskEdge?: string;
   onEditIntent?: (intent: OverlayEditIntent) => void;
+  onTransformStart?: (
+    event: React.PointerEvent<SVGElement>,
+    clipId: string,
+    kind: 'move' | 'scale' | 'rotate',
+  ) => void;
   displayScale?: number;
 }) {
   const guides = useStudio((s) => s.guides);
@@ -280,6 +286,7 @@ export function CompositorOverlay({
               role="button"
               tabIndex={0}
               aria-label="move text (Phase 7 intent)"
+              onPointerDown={(event) => onTransformStart?.(event, id, 'move')}
               onClick={() => intent({ clipId: id, kind: 'move' })}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
@@ -322,6 +329,13 @@ export function CompositorOverlay({
                     : 'scale text (Phase 7 intent)'
                 }
                 className={styles.handle}
+                onPointerDown={(event) =>
+                  onTransformStart?.(
+                    event,
+                    id,
+                    index === 4 ? 'rotate' : 'scale',
+                  )
+                }
                 onClick={() =>
                   intent({ clipId: id, kind: index === 4 ? 'rotate' : 'scale' })
                 }

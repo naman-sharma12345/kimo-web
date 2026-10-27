@@ -10,6 +10,28 @@ import {
 export const DUCK_GAIN = Math.pow(10, -12 / 20);
 export const DUCK_SECONDS = 0.3;
 export const SCRUB_SECONDS = 0.06;
+/** Actual post-master time-domain samples, never a volume estimate. */
+export interface AudioLevels {
+  available: boolean;
+  state: 'measuring' | 'paused' | 'suspended' | 'unavailable' | 'disposed';
+  peak: number;
+  rms: number;
+  peakDb: number | null;
+  rmsDb: number | null;
+}
+export interface AudioCapabilities {
+  keepPitch: boolean;
+  reason?: string;
+}
+export function audioCapabilities(kind: string): AudioCapabilities {
+  return kind === 'video'
+    ? { keepPitch: true }
+    : {
+        keepPitch: false,
+        reason:
+          'Pitch-preserving buffered audio is unavailable; native video pitch control only',
+      };
+}
 export interface AudioEngineOptions {
   context?: AudioContext;
   createContext?: () => AudioContext;
@@ -67,20 +89,33 @@ function volumeKeys(clip: MediaClip): VolumeKey[] {
       };
     });
 }
+/** Clip-local linear fades multiply keyed gain; no master or duck is applied here. */
+export function fadeGainAt(clip: MediaClip, localTime: number): number {
+  const unit = (n: number) => Math.max(0, Math.min(1, n));
+  return (
+    (clip.fadeInSec ? unit(localTime / clip.fadeInSec) : 1) *
+    (clip.fadeOutSec ? unit((clip.duration - localTime) / clip.fadeOutSec) : 1)
+  );
+}
 /** Same exported interpolation as pure scene audio; master/duck/gates are NOT inputs here. */
 export function volumeAt(clip: MediaClip, localTime: number): number {
-  return Math.max(
-    0,
-    interpolateKeyframes(
-      volumeKeys(clip),
-      localTime + (clip.animationOffsetSec ?? 0),
-      clip.volume ?? 1,
-    ),
+  return (
+    Math.max(
+      0,
+      interpolateKeyframes(
+        volumeKeys(clip),
+        localTime + (clip.animationOffsetSec ?? 0),
+        clip.volume ?? 1,
+      ),
+    ) * fadeGainAt(clip, localTime)
   );
 }
 export class AudioEngine {
   private context?: AudioContext;
   private master?: GainNode;
+  private analyser?: AnalyserNode;
+  private samples?: Float32Array<ArrayBuffer>;
+  private playing = false;
   private readonly options: AudioEngineOptions;
   private readonly voices = new Map<string, Voice>();
   private readonly buffers = new Map<string, AudioBuffer>();
@@ -113,7 +148,22 @@ export class AudioEngine {
     )();
     if (!this.master) {
       this.master = this.context.createGain();
-      this.master.connect(this.context.destination);
+      // Some injected/legacy contexts lack analyser support. Playback still works.
+      if (typeof this.context.createAnalyser === 'function') {
+        try {
+          this.analyser = this.context.createAnalyser();
+          this.analyser.fftSize = 2048;
+          this.samples = new Float32Array(this.analyser.fftSize);
+          this.analyser.connect(this.context.destination);
+          this.master.connect(this.analyser);
+        } catch {
+          this.analyser?.disconnect();
+          this.analyser = undefined;
+          this.samples = undefined;
+          this.master.connect(this.context.destination);
+          this.issue('Output audio analyser unavailable');
+        }
+      } else this.master.connect(this.context.destination);
     }
     return this.context;
   }
@@ -129,6 +179,38 @@ export class AudioEngine {
       );
       return false;
     }
+  }
+  /** Samples only the existing graph while playing. Zeroes immediately on pause/dispose. */
+  getLevels(): AudioLevels {
+    const available = !this.disposed && !!this.analyser && !!this.samples;
+    const state: AudioLevels['state'] = this.disposed
+      ? 'disposed'
+      : !available
+        ? 'unavailable'
+        : !this.playing
+          ? 'paused'
+          : this.context?.state !== 'running'
+            ? 'suspended'
+            : 'measuring';
+    let peak = 0,
+      sum = 0;
+    if (state === 'measuring' && this.analyser && this.samples) {
+      this.analyser.getFloatTimeDomainData(this.samples);
+      for (const value of this.samples) {
+        const sample = Number.isFinite(value) ? value : 0;
+        peak = Math.max(peak, Math.abs(sample));
+        sum += sample * sample;
+      }
+    }
+    const rms = this.samples ? Math.sqrt(sum / this.samples.length) : 0;
+    return {
+      available,
+      state,
+      peak,
+      rms,
+      peakDb: peak > 0 ? 20 * Math.log10(peak) : null,
+      rmsDb: rms > 0 ? 20 * Math.log10(rms) : null,
+    };
   }
   audioTime(): number | null {
     return this.active && this.context?.state === 'running'
@@ -251,21 +333,20 @@ export class AudioEngine {
       ...new Map(volumeKeys(clip).map((key) => [key.time, key])).values(),
     ].sort((a, b) => a.time - b.time);
     const at = (timeline: number) =>
-      Math.max(
-        0,
-        interpolateKeyframes(
-          keys,
-          timeline - clip.start + (clip.animationOffsetSec ?? 0),
-          clip.volume ?? 1,
-        ),
-      ) * gate;
+      volumeAt(clip, timeline - clip.start) * gate;
     gain.setValueAtTime(at(time), now);
-    if (!keys.length) return;
+    if (!keys.length && !clip.fadeInSec && !clip.fadeOutSec) return;
     const end = Math.min(clip.start + clip.duration, time + 1.5);
     const boundaries = keys
       .map((key) => clip.start + key.time - (clip.animationOffsetSec ?? 0))
       .filter((t) => t > time && t < end);
+    for (const boundary of [
+      clip.start + (clip.fadeInSec ?? 0),
+      clip.start + clip.duration - (clip.fadeOutSec ?? 0),
+    ])
+      if (boundary > time && boundary < end) boundaries.push(boundary);
     boundaries.push(end);
+    boundaries.sort((a, b) => a - b);
     let start = time;
     for (const stop of boundaries) {
       if (stop <= start) continue;
@@ -275,16 +356,31 @@ export class AudioEngine {
       const when = now + (start - time) / rate;
       const until = now + (stop - time) / rate;
       if (
-        after &&
-        (left?.easing === 'ease_out' ||
-          left?.easing === 'ease_in_out' ||
-          left?.easing === 'bezier')
+        !!clip.fadeInSec ||
+        !!clip.fadeOutSec ||
+        (after &&
+          (left?.easing === 'ease_out' ||
+            left?.easing === 'ease_in_out' ||
+            left?.easing === 'bezier'))
       ) {
         // WebAudio linearly interpolates these bounded samples of the exact shared easing.
+        const holdBoundary =
+          left?.easing === 'hold' &&
+          keys.some(
+            (key) =>
+              Math.abs(
+                clip.start + key.time - (clip.animationOffsetSec ?? 0) - stop,
+              ) < 1e-9,
+          );
         const values = Float32Array.from({ length: 129 }, (_, index) =>
-          at(start + ((stop - start) * index) / 128),
+          holdBoundary && index === 128
+            ? Math.max(0, left.value) *
+              fadeGainAt(clip, stop - clip.start) *
+              gate
+            : at(start + ((stop - start) * index) / 128),
         );
         gain.setValueCurveAtTime(values, when, until - when);
+        if (holdBoundary) gain.setValueAtTime(at(stop), until);
       } else if (after && left?.easing === 'hold')
         gain.setValueAtTime(at(stop), until);
       else gain.linearRampToValueAtTime(at(stop), until);
@@ -328,6 +424,7 @@ export class AudioEngine {
       this.pause();
       return;
     }
+    this.playing = true;
     const master = Math.max(0, state.master ?? 1);
     this.master?.gain.setValueAtTime(master, now);
     const discontinuity =
@@ -388,6 +485,9 @@ export class AudioEngine {
         clip.keyframes,
         clip.volume,
         clip.animationOffsetSec,
+        clip.fadeInSec,
+        clip.fadeOutSec,
+        clip.keepPitch,
       ]);
       let voice = this.voices.get(clip.id);
       if (
@@ -427,6 +527,7 @@ export class AudioEngine {
             voice.mediaSource = source;
             voice.element = element;
             element.muted = false;
+            element.preservesPitch = clip.keepPitch ?? false;
           } catch (error) {
             this.issue(
               `Video audio unavailable: ${error instanceof Error ? error.message : 'source failed'}`,
@@ -435,6 +536,10 @@ export class AudioEngine {
             continue;
           }
         } else if (buffer) {
+          if (clip.keepPitch && clip.speed * rate !== 1)
+            this.issue(
+              'Pitch-preserving buffered audio is unavailable; native video pitch control only',
+            );
           const source = context.createBufferSource();
           source.buffer = buffer;
           source.playbackRate.setValueAtTime(clip.speed * rate, now);
@@ -462,7 +567,11 @@ export class AudioEngine {
       this.envelope(voice, clip, time, rate, 1);
       this.duck(
         voice,
-        clip.audioRole === 'music' && voiceActive ? DUCK_GAIN : 1,
+        clip.audioRole === 'music' &&
+          clip.duckUnderVoice !== false &&
+          voiceActive
+          ? DUCK_GAIN
+          : 1,
         now,
       );
     }
@@ -536,6 +645,8 @@ export class AudioEngine {
     return played;
   }
   pause(): void {
+    this.playing = false;
+    this.samples?.fill(0);
     for (const id of this.voices.keys()) this.remove(id);
     this.clearBlips();
     this.lastTime = undefined;
@@ -546,6 +657,8 @@ export class AudioEngine {
     this.pause();
     this.disposed = true;
     this.master?.disconnect();
+    this.analyser?.disconnect();
+    this.samples = undefined;
     this.buffers.clear();
     this.bufferVersions.clear();
     for (const entry of this.loading.values()) entry.controller.abort();

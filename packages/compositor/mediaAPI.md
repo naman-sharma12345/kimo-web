@@ -116,3 +116,34 @@ HTMLVideoElement decode and seek run on the main thread because workers cannot c
 ## Validation boundary
 
 Focused tests exercise fake clocks, DOM callbacks and WebAudio operations, plus source-time/cache/worker resource paths. They do not launch a browser, synthesize an actual decoded-frame pass, measure hardware FPS, prove cold seek latency, certify real audio output or verify one-frame A/V sync. Parent owns managed-browser fixtures, the four canonical gates, actual codec/CORS/user-activation checks and publication.
+
+## Phase 7 preview additions (2026-10-27)
+
+Single authority is unchanged. Graph with analyser support is source -> clip gain -> duck gain -> master -> analyser -> destination, in the SAME AudioContext. Without createAnalyser it remains master -> destination and the meter is explicitly unavailable. Reading the meter never constructs or resumes a context.
+
+```ts
+interface AudioLevels {
+  available: boolean;
+  state: 'measuring' | 'paused' | 'suspended' | 'unavailable' | 'disposed';
+  peak: number; // absolute maximum of actual master output samples, may exceed 1
+  rms: number; // sqrt(mean(sample^2)), not peak or slider estimate
+  peakDb: number | null; // 20*log10(peak), null at zero
+  rmsDb: number | null;
+}
+```
+
+`audio.getLevels()` / `controller.getAudioLevel()` returns this structure. There is no clip meter: parent must label it master/output. UI thresholds are warning above -6 dBFS, error at or above 0 dBFS; no estimation or second context is appropriate. Actual samples are polled on demand only while playing with a running context; paused/disposed/suspended states zero the display immediately. No nonzero cached reading persists after stopping. Float32 fixtures in tests exercise silence, warning, clipping, RMS/peak distinction and disposal, not actual browser sound.
+
+`controller.getAudioCapabilities(clipId)` returns `{keepPitch:boolean,reason?:string}`. Native video supports its element's preservesPitch path; audio-only buffered playback is explicitly unsupported, even though the proposed keepPitch field survives schema parsing. Non-unit buffered keepPitch playback reports that limitation; Inspector must disable it with the capability reason. This patch does not allocate an audio-only native media path or increase the six-decoder budget.
+
+Raw clip fade gain is `clamp(local/fadeInSec)*clamp((duration-local)/fadeOutSec)` with an absent/zero side equal to one. It multiplies the shared keyed-volume scalar on the animation-offset clock. `duckUnderVoice:false` excludes that music clip from ducking and releases any previous duck ramp continuously; it is consumed by raw audio AND resolved scene metadata. `keepPitch` defaults false on native video to preserve existing pitch-rate semantics. Buffer pitch and video CORS/speaker output remain browser fidelity gaps.
+
+Preview-only controller editing: `setEditingTextClip(id|null)` suppresses only visual text in the renderer input; `onScene` remains unfiltered. Existing exported `measureTextOverlay(layer,scene)` measures loaded-font Pixi CPU geometry with no additional GPU renderer. Clear this transient suppression on editor cancel, commit and teardown; never translate it into a server op. `getCompareCapability()` currently returns `{available:false,reason:'Isolated before/after grade composition is not implemented'}`. No comparison pixels or setCompare API are supplied.
+
+### Typed text measurement bridge
+
+The package now exports `ControllerPreviewAPI`, `TextGlyphBounds`, `MeasuredTextStyle`, `MeasuredTextRegion`, `TextFontStatus`, `TextOverlayBounds`, `TextMeasurementOptions`, `measureTextOverlay` and its `measureResolvedTextLayout` alias. ControllerPreviewAPI consists of readonly currentScene plus setEditingTextClip/getAudioLevel/getAudioCapabilities/getCompareCapability. No new controller, clock, renderer or decoder is required.
+
+`await measureTextOverlay(layer,scene,{loadFont?})` retains the previous combined rectangle and word rectangles, adding `status:ready|font-pending|unavailable`, `primary:{bounds,style}`, optional `secondary:{bounds,style}`. Bounds use actual Pixi CPU glyph geometry before transforms relative to scene centre. Style contains source fontFamily, scaled fontSize, fontWeight/fontStyle, measured lineHeight, resolved letterSpacing, source colour/alignment and optional alpha-correct WebkitTextStroke. Secondary style/bounds are independent of primary, including lower-third pop-word mode. Parent must not place both editable regions over the combined rectangle.
+
+Font-pending/unavailable is not authorization to hide text: keep the existing preview and use read-only editing until ready. Missing CPU layout or rejected measurement must map to unavailable, not a guessed line-height/box. The existing document.fonts.ready event can trigger a parent remeasurement without another clock. An explicit injected loadFont(css,content) must truthfully resolve true only for the requested face; default browser checks reject empty fallback-only FontFace loads even when check() returns true. Actual rendering and measuring share one glyph-layout helper. No GPU success is implied by these CPU measurements.

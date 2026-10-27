@@ -1,3 +1,4 @@
+import { targetsLockedEntity } from './agent-locks';
 import http from 'node:http';
 import {
   createReadStream,
@@ -138,13 +139,16 @@ export function createMockServer(
     source: 'user',
   }));
   function batch(s: Session, ops: Op[], actionId?: string) {
+    if (actionId && targetsLockedEntity(s.snapshot.project, ops)) return false;
     s.snapshot.project = applyOps(s.snapshot.project, ops);
     emit(s, {
       t: 'project.ops',
       version: s.snapshot.project.version,
       ops,
       actionId,
+      author: actionId ? 'agent' : 'user',
     });
+    return true;
   }
   function action(
     s: Session,
@@ -155,13 +159,50 @@ export function createMockServer(
   ) {
     const id = `action-${i}-${randomUUID()}`;
     emit(s, { t: 'agent.status', state: 'acting', label: title });
-    emit(s, { t: 'agent.action.start', id, tool, title, args: {} });
-    batch(s, ops, id);
+    const samTarget =
+      tool === 'sam_mask'
+        ? {
+            clipId: 'c2',
+            time: 7,
+            coordinateSpace: 'source_uv' as const,
+            subjectLabel: 'synthetic ellipse',
+            previewPolygon: Array.from(
+              { length: 16 },
+              (_, point): [number, number] => {
+                const angle = (point * Math.PI) / 8;
+                return [
+                  0.5 + (Math.cos(angle) * 110) / 640,
+                  0.5 + (Math.sin(angle) * 155) / 360,
+                ];
+              },
+            ),
+          }
+        : undefined;
+    emit(s, {
+      t: 'agent.action.start',
+      id,
+      tool,
+      title,
+      args: {},
+      ...(samTarget ? { target: samTarget } : {}),
+    });
+    const applied = batch(s, ops, id);
+    if (samTarget && applied)
+      emit(s, {
+        t: 'sam.mask',
+        actionId: id,
+        clipId: samTarget.clipId,
+        maskAssetId: 'mask-2',
+        coordinateSpace: samTarget.coordinateSpace,
+        subjectLabel: samTarget.subjectLabel,
+        previewPolygon: samTarget.previewPolygon,
+      });
     emit(s, { t: 'agent.action.progress', id, pct: 1 });
     emit(s, {
       t: 'agent.action.end',
       id,
-      ok: true,
+      ok: applied,
+      ...(!applied ? { error: 'clip or track is locked' } : {}),
       durationMs: Math.round(1200 / speed),
     });
   }
@@ -517,19 +558,6 @@ export function createMockServer(
           later(s, 200, run);
           return;
         }
-        if (entry.tool === 'sam_mask') {
-          emit(s, {
-            t: 'sam.mask',
-            clipId: 'c2',
-            maskAssetId: 'mask-2',
-            previewPolygon: [
-              [0.3, 0.2],
-              [0.6, 0.2],
-              [0.7, 0.8],
-              [0.2, 0.8],
-            ],
-          });
-        }
         if (i === 18) {
           const asset: Asset = {
             id: 'web-original',
@@ -854,7 +882,22 @@ export function createMockServer(
         }
         if (segments[4] === 'messages' && req.method === 'POST') {
           const input = messageRequestSchema.parse(await body(req));
-          interrupt(s, input.text);
+          const attachments = [...new Set(input.attachments ?? [])];
+          if (attachments.some((id) => !uploads.get(id)?.complete)) {
+            json(res, 400, { error: 'attachment is missing or not uploaded' });
+            return;
+          }
+          for (const id of attachments) {
+            const asset = uploads.get(id)?.asset;
+            if (
+              asset &&
+              !s.snapshot.assets.some((current) => current.id === id)
+            ) {
+              s.snapshot.assets.push(asset);
+              emit(s, { t: 'asset.added', asset });
+            }
+          }
+          if (input.text.trim()) interrupt(s, input.text);
           json(res, 202, { accepted: true });
           return;
         }

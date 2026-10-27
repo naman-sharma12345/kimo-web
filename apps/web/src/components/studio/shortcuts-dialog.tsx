@@ -23,23 +23,29 @@ export function ShortcutsDialog({
       <DialogContent size="md" className="studio-shortcuts">
         <DialogTitle>keyboard shortcuts</DialogTitle>
         <DialogDescription>
-          editing commands connect in Phase 7; playback connects in Phase 6.
+          Shortcuts do not run while you are typing. Playback requires an
+          available preview.
         </DialogDescription>
         <div className="studio-shortcut-columns">
-          {studioShortcuts.map((shortcut) => (
-            <Row
-              key={shortcut.id}
-              dense
-              label={shortcut.label}
-              value={
-                <span className="studio-kbd-group">
-                  {shortcut.keys.map((key) => (
-                    <Kbd key={key}>{key}</Kbd>
-                  ))}
-                </span>
-              }
-            />
-          ))}
+          {studioShortcuts
+            .filter(
+              (shortcut, index, all) =>
+                all.findIndex((item) => item.id === shortcut.id) === index,
+            )
+            .map((shortcut) => (
+              <Row
+                key={`${shortcut.id}:${shortcut.key}`}
+                dense
+                label={shortcut.label}
+                value={
+                  <span className="studio-kbd-group">
+                    {shortcut.keys.map((key) => (
+                      <Kbd key={key}>{key}</Kbd>
+                    ))}
+                  </span>
+                }
+              />
+            ))}
         </div>
         <DialogActions>
           <Button onClick={() => onOpenChange(false)}>close</Button>

@@ -1,3 +1,4 @@
+import { createResolvedTextLayout, textBlockOrigin } from './text-styles';
 import type * as PIXI from 'pixi.js';
 import type { LiveFilter, FilterMode } from './filters';
 import type {
@@ -23,6 +24,60 @@ export type {
   RenderResult,
 } from './renderer-types';
 
+/** Failure-only read-only adapter probe. Does not request a device or create a GL context. */
+export async function gpuAvailabilityDiagnostic(
+  environment: {
+    secureContext: boolean;
+    webgl2Api: boolean;
+    requestAdapter?: () => Promise<unknown>;
+  } = {
+    secureContext: globalThis.isSecureContext === true,
+    webgl2Api: typeof WebGL2RenderingContext !== 'undefined',
+    requestAdapter:
+      typeof navigator !== 'undefined' && 'gpu' in navigator
+        ? () =>
+            (
+              navigator as Navigator & {
+                gpu: { requestAdapter: () => Promise<unknown> };
+              }
+            ).gpu.requestAdapter()
+        : undefined,
+  },
+): Promise<Error> {
+  let adapter = 'API absent';
+  let probeCause: Error | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (environment.requestAdapter) {
+    try {
+      adapter = await Promise.race([
+        environment
+          .requestAdapter()
+          .then((value) =>
+            value
+              ? 'available (device not requested)'
+              : 'unavailable (null adapter)',
+          ),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(
+            () => resolve('probe timed out (availability unknown)'),
+            500,
+          );
+        }),
+      ]);
+    } catch (reason) {
+      adapter = 'probe rejected (availability unknown)';
+      // The UI selects/redacts bounded exception strings, never stacks or arbitrary fields.
+      if (reason instanceof Error) probeCause = reason;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return new Error(
+    `GPU support: secure context=${environment.secureContext}; WebGPU adapter ${adapter}; WebGL2 API=${environment.webgl2Api ? 'exposed' : 'absent'} (context not probed; renderer initialization causes above are authoritative).`,
+    probeCause ? { cause: probeCause } : undefined,
+  );
+}
+
 type Pixi = typeof PIXI;
 function required<T>(value: T | undefined): T {
   if (value === undefined)
@@ -44,6 +99,7 @@ interface LayerNode {
   resources: Set<string>;
   filters: Map<string, LiveFilter>;
   contentSignature?: string;
+  fontReady?: boolean;
   wordTexts?: PIXI.Text[];
   pairBlend?: LiveFilter;
 }
@@ -164,7 +220,7 @@ export class PixiRenderer implements SceneRenderer {
           app.destroy({ removeView: false }, { children: true });
         else app.stage.destroy({ children: true });
         throw new AggregateError(
-          [preferredError, fallbackError],
+          [preferredError, fallbackError, await gpuAvailabilityDiagnostic()],
           'WebGPU/WebGL preview initialization failed',
         );
       }
@@ -290,10 +346,23 @@ export class PixiRenderer implements SceneRenderer {
             () =>
               this.options.loadFont?.(css, content) ??
               (typeof document !== 'undefined' && document.fonts
-                ? document.fonts.load(css, content).then((f) => f.length > 0)
+                ? document.fonts
+                    .load(css, content || ' ')
+                    .then(
+                      (faces) =>
+                        faces.length > 0 &&
+                        faces.every((face) => face.status === 'loaded') &&
+                        document.fonts.check(css, content || ' '),
+                    )
                 : false),
           )
-          .catch(() => false);
+          .catch(() => false)
+          .then((loaded) => {
+            if (!loaded && this.fonts.get(key) === ready)
+              this.fonts.delete(key);
+            if (loaded) this.pixi?.CanvasTextMetrics.clearMetrics();
+            return loaded;
+          });
         if (this.fonts.size >= 128) {
           const oldest = this.fonts.keys().next().value;
           if (oldest !== undefined) this.fonts.delete(oldest);
@@ -304,13 +373,13 @@ export class PixiRenderer implements SceneRenderer {
     };
     const s = text.style;
     const primary = load(
-      `${s.fontStyle} ${s.fontWeight} ${s.fontSize}px "${s.fontFamily}"`,
+      `${s.fontStyle} ${s.fontWeight} ${s.fontSize * text.scale}px "${s.fontFamily}"`,
       text.content,
     );
     const secondary =
       s.secondary && text.secondaryContent
         ? load(
-            `normal ${s.secondary.fontWeight} ${s.secondary.fontSize}px "${s.secondary.fontFamily}"`,
+            `normal ${s.secondary.fontWeight} ${s.secondary.fontSize * text.scale}px "${s.secondary.fontFamily}"`,
             text.secondaryContent,
           )
         : Promise.resolve(true);
@@ -326,6 +395,20 @@ export class PixiRenderer implements SceneRenderer {
   async render(scene: SceneGraph): Promise<RenderResult> {
     if (!this.app || !this.root || this.disposed)
       throw new Error('renderer not initialized');
+    if (scene.excludedTextPairs?.length) {
+      // Preserve the pair's weights/black plane/order with transparent text, not a missing member.
+      const layers = [...scene.layers];
+      for (const { layer, index } of scene.excludedTextPairs)
+        layers.splice(index, 0, {
+          ...layer,
+          text: undefined,
+          assetId: undefined,
+          mask: undefined,
+          effects: [],
+          opacity: 0,
+        });
+      scene = { ...scene, layers };
+    }
     const revision = ++this.revision;
     this.pendingPreparations.forEach((cancel) => cancel());
     this.pendingPreparations.clear();
@@ -490,13 +573,18 @@ export class PixiRenderer implements SceneRenderer {
       const visible = new Set(scene.layers.map((l) => l.clipId));
       for (const id of this.nodes.keys())
         if (!visible.has(id)) this.destroyNode(id);
-      scene.layers.forEach((layer) => {
+      scene.layers.forEach((layer, layerIndex) => {
         let node = this.nodes.get(layer.clipId);
         if (node && node.kind !== layer.kind) {
           this.destroyNode(layer.clipId);
           node = undefined;
         }
         node ??= this.createNode(layer);
+        if (layer.text) {
+          if (node.fontReady === false && fontResults[layerIndex])
+            node.contentSignature = undefined;
+          node.fontReady = fontResults[layerIndex];
+        }
 
         const resources = required(prepared.get(layer.clipId));
         const next = new Set<string>();
@@ -519,6 +607,9 @@ export class PixiRenderer implements SceneRenderer {
         });
       });
       this.compositePairs(scene, warn);
+      const [r, g, b, alpha] = scene.background ?? [0, 0, 0, 1];
+      this.app.renderer.background.color = [r, g, b];
+      this.app.renderer.background.alpha = alpha;
       this.app.render();
       this.hasFrame = true;
       return { submitted: true, retained: false, approximations };
@@ -861,100 +952,13 @@ export class PixiRenderer implements SceneRenderer {
     const p = required(this.pixi),
       s = text.style,
       scale = text.scale;
-    const style: Partial<PIXI.TextStyleOptions> = {
-      fontFamily: s.fontFamily,
-      fontSize: s.fontSize * scale,
-      fontWeight: String(s.fontWeight) as '400' | '500',
-      fontStyle: s.fontStyle,
-      fill: s.fill,
-      wordWrap: true,
-      wordWrapWidth: text.safeRect.width,
-      breakWords: true,
-      align: s.placement === 'lower-left' ? 'left' : 'center',
-      ...(s.stroke
-        ? {
-            stroke: {
-              color: s.stroke.color,
-              alpha: s.stroke.alpha,
-              width: s.stroke.width * scale,
-            },
-          }
-        : {}),
-    };
-    const block = new p.Container();
-    if (s.activeWordColor && text.words.length) {
-      // Build wrapping rows with actual loaded-font measurements, then center each row.
-      const rows: PIXI.Text[][] = [[]];
-      node.wordTexts = [];
-      let rowWidth = 0;
-      const space = p.CanvasTextMetrics.measureText(
-        ' ',
-        new p.TextStyle(style),
-      ).width;
-      for (const word of text.words) {
-        const t = new p.Text({
-          text: word.text,
-          style: {
-            ...style,
-            wordWrap: false,
-            fill: word.active ? s.activeWordColor : s.fill,
-          },
-        });
-        if (
-          rowWidth + t.width > text.safeRect.width &&
-          required(rows.at(-1)).length
-        ) {
-          rows.push([]);
-          rowWidth = 0;
-        }
-        required(rows.at(-1)).push(t);
-        node.wordTexts.push(t);
-        rowWidth += t.width + space;
-      }
-      let y = 0;
-      for (const row of rows) {
-        const width =
-          row.reduce((n, t) => n + t.width, 0) +
-          Math.max(0, row.length - 1) * space;
-        let x = -width / 2;
-        let height = 0;
-        for (const t of row) {
-          t.position.set(x, y);
-          x += t.width + space;
-          height = Math.max(height, t.height);
-          block.addChild(t);
-        }
-        y += height;
-      }
-    } else {
-      const primary = new p.Text({ text: text.content, style });
-      block.addChild(primary);
-      if (s.secondary && text.secondaryContent) {
-        const secondary = new p.Text({
-          text: text.secondaryContent,
-          style: {
-            ...style,
-            fontFamily: s.secondary.fontFamily,
-            fontSize: s.secondary.fontSize * scale,
-            fontWeight: '400',
-          },
-        });
-        secondary.y = primary.height;
-        block.addChild(secondary);
-      }
-    }
+    const layout = createResolvedTextLayout(p, text);
+    const block = layout.block;
+    node.wordTexts = layout.words;
     const bounds = block.getLocalBounds();
-    const left = s.placement === 'lower-left';
-    const x =
-      text.anchor.x -
-      scene.width / 2 -
-      (left ? 0 : bounds.width / 2) -
-      bounds.x;
-    const y =
-      text.anchor.y -
-      scene.height / 2 -
-      (s.placement === 'center' ? bounds.height / 2 : bounds.height) -
-      bounds.y;
+    const origin = textBlockOrigin(text, scene, bounds);
+    const x = origin.x - bounds.x,
+      y = origin.y - bounds.y;
     // Pop rows already use centered x coordinates; bounds.x accounts for this.
     block.position.set(x, y);
     if (s.background) {
