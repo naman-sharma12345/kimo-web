@@ -58,12 +58,17 @@ describe('mock HTTP and websocket integration', () => {
       const snapshot = await app.client.session(session.sessionId);
       expect(snapshot.project.width).toBe(1080);
       expect(snapshot.wsUrl).toBe(session.wsUrl);
+      expect(snapshot.actionIds).toEqual([]);
       expect(await (await fetch(snapshot.assets[0]?.url ?? '')).text()).toBe(
         'abc',
       );
       expect(await app.client.ops(session.sessionId, [], 0)).toEqual({
         version: 1,
       });
+      // A project version bump from client ops is not agent action history.
+      expect((await app.client.session(session.sessionId)).actionIds).toEqual(
+        [],
+      );
       await expect(
         app.client.ops(session.sessionId, [], 0),
       ).rejects.toMatchObject({ status: 409 });
@@ -127,6 +132,15 @@ describe('mock HTTP and websocket integration', () => {
       expect(events.some((e) => e.t === 'sam.mask')).toBe(true);
       const snapshot = await app.client.session(session.sessionId);
       expect(snapshot.status).toBe('awaiting_review');
+      const recordedIds = () => [
+        ...new Set(
+          events.flatMap((event) =>
+            event.t === 'agent.action.start' ? [event.id] : [],
+          ),
+        ),
+      ];
+      expect(snapshot.actionIds).toEqual(recordedIds());
+      expect(snapshot.actionIds).toHaveLength(45);
       expect(snapshot.project.clips.captions?.text?.words).toHaveLength(5);
       expect(
         snapshot.assets.find((a) => a.id === 'web-original')?.attribution,
@@ -143,7 +157,35 @@ describe('mock HTTP and websocket integration', () => {
       expect(events.filter((e) => e.t === 'agent.action.start')).toHaveLength(
         48,
       );
-      ws.close();
+      // Restore through actual REST after disconnect, including actions emitted
+      // with no subscriber. Do not reconstruct IDs from project versions.
+      await new Promise<void>((resolve) => {
+        ws.once('close', resolve);
+        ws.close();
+      });
+      const restored = await app.client.session(session.sessionId);
+      expect(restored.actionIds).toEqual(recordedIds());
+      expect(restored.actionIds).toHaveLength(48);
+      const latest = await app.client.ops(
+        session.sessionId,
+        [],
+        restored.project.version,
+      );
+      expect(latest.version).toBe(restored.project.version + 1);
+      expect((await app.client.session(session.sessionId)).actionIds).toEqual(
+        restored.actionIds,
+      );
+      await app.client.message(session.sessionId, 'slower again');
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const offline = await app.client.session(session.sessionId);
+      expect(offline.actionIds?.slice(0, 48)).toEqual(restored.actionIds);
+      expect(offline.actionIds).toHaveLength(51);
+      expect(new Set(offline.actionIds).size).toBe(51);
+      expect(
+        offline.actionIds
+          ?.slice(48)
+          .every((id) => !restored.actionIds?.includes(id)),
+      ).toBe(true);
     } finally {
       await app.close();
     }

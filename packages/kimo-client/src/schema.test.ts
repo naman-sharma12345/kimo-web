@@ -80,6 +80,23 @@ describe('all contracts', () => {
     s.versionResponseSchema.parse({ version: 1 });
     s.completeRequestSchema.parse({ parts: [{ partNumber: 1, etag: 'etag' }] });
   });
+  it('accepts optional recorded action IDs without inventing legacy history', () => {
+    const legacy: s.SessionSnapshot = {
+      status: 'awaiting_review',
+      project: { ...sampleProject, version: 99 },
+      assets: [],
+    };
+    expect(s.sessionSnapshotSchema.parse(legacy)).toEqual(legacy);
+    expect(s.sessionSnapshotSchema.parse(legacy).actionIds).toBeUndefined();
+    for (const actionIds of [[], ['recorded-a', 'recorded-b']]) {
+      const snapshot: s.SessionSnapshot = { ...legacy, actionIds };
+      expect(s.sessionSnapshotSchema.parse(snapshot)).toEqual(snapshot);
+    }
+    for (const actionIds of [null, 2, 'recorded-a', [1], ['']])
+      expect(
+        s.sessionSnapshotSchema.safeParse({ ...legacy, actionIds }).success,
+      ).toBe(false);
+  });
   const ops: s.Op[] = [
     { op: 'clip.add', clip: sampleClip },
     { op: 'clip.update', id: 'c', patch: { volume: 0.5 } },

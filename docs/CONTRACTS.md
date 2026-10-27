@@ -9,3 +9,9 @@ Multipart Phase 3 extension: sizes >100 MiB return 16 MiB presigned parts, numbe
 Minimal previously unspecified nested types: TextStyleId title|caption|lower_third; Effect {id,kind,params:Record<string,string|number|boolean>}; Keyframe {property,time,value,easing?:linear|ease_out|ease_in_out}; Transition {kind:cut|crossfade|dip,duration}; Marker {id,time,label}. Transform crop is nonnegative {l,t,r,b}. All Op variants have typed payloads, no any.
 
 Version: every batch increments once. Gap causes GET and replacement. Optimistic edits send previous baseVersion; on409 refetch, reapply once and resubmit; a second conflict refetches and surfaces failure. Pause/resume/interrupt/ping are native WS client packets; malformed packets never mutate project state.
+
+## Optional session action history (Phase 5 restore)
+
+`SessionSnapshot.actionIds?: string[]` contains unique server-recorded `agent.action.start.id` values for that session. IDs are nonempty strings using the existing ID schema. This is recorded action history, not a count or IDs inferred from `project.version`, `project.ops.actionId`, review status, or project contents. Servers supplying the field must record each unique start ID when emitting the event, including when no client is connected; the mock stores it in its in-memory session snapshot and includes it in GET /v1/sessions/:id. This does not add disk persistence across mock restarts. Client-originated op batches do not add IDs.
+
+The field is optional for backward compatibility: older snapshots still validate without it, and omission is not converted into fabricated history. Studio resets session state, hydrates `snapshot.actionIds ?? []`, and deduplicates incoming live starts against those IDs. A nonempty supplied history preserves action count and finish eligibility on reload; an omitted or empty history leaves finish disabled until an actual start arrives. No event replay or new endpoint is required.

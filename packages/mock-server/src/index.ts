@@ -82,6 +82,10 @@ export function createMockServer(
   const sessions = new Map<string, Session>();
   const renders = new Map<string, { sessionId: string; started: number }>();
   const emit = (s: Session, event: ServerEvent) => {
+    if (event.t === 'agent.action.start') {
+      const actionIds = (s.snapshot.actionIds ??= []);
+      if (!actionIds.includes(event.id)) actionIds.push(event.id);
+    }
     for (const ws of s.sockets)
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(event));
   };
@@ -800,6 +804,7 @@ export function createMockServer(
         sessions.set(id, {
           snapshot: {
             status: 'warming',
+            actionIds: [],
             project: project(id, input.aspect === '9:16'),
             assets: input.assetIds.flatMap((id) => {
               const upload = uploads.get(id);

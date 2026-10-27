@@ -52,11 +52,11 @@ This is a **tested implementation checkpoint, not complete visual acceptance**. 
 - [ ] Final integration review, restore and error routing: IN PROGRESS.
 - [ ] Cancel/retry/time-out, actual streamed session navigation and asset prefetch verified in a browser: UNVERIFIED.
 - [ ] Reduced-motion screenshots and 60fps unfold video: NOT RUN.
-- [ ] Exact unfold-to-final-Studio geometry cannot be accepted: the final Studio is specified in later, unsupplied phases.
+- [ ] Exact unfold-to-final-Studio geometry remains unverified. Phase 5 has since been supplied and its shell is now under validation.
 
 ## Browser evidence boundary
 
-The implementation environment permits only its managed browser. Local Playwright/Chromium execution is not permitted here. No public deployment or tunnel was authorized. Playwright, axe and screenshot harnesses are supplied for an authorized reachable test environment, but have not been executed. There are deliberately no fabricated screenshot paths in this log.
+The implementation environment permits only its managed browser. Local Playwright/Chromium execution is not permitted here. Temporary frontend previews were subsequently authorized; actual captured evidence is listed below. Playwright and axe harnesses are supplied but have not been executed. No fabricated screenshot paths or local-browser execution are claimed.
 
 ## Publication
 
@@ -83,3 +83,46 @@ Remaining visual and browser acceptance items above remain unchecked. No full Ph
 At 2026-10-26 19:51 UTC, the complete sequential command `pnpm lint && pnpm typecheck && pnpm test && pnpm build` exited 0 on the final implementation, including the grain generator, new browser-test scripts and Studio restoration boundary. All 107 tests in 13 files passed. The production build completed with zero warnings. This result does not change any unverified visual/browser acceptance item.
 
 Post-gate HTTP smoke found the gallery omitted its required data-ready marker, which would hang the screenshot harness. The marker was added before the final corrected publication gate. Landing, token gallery, UI gallery and grain asset all returned HTTP 200; browser rendering remains unverified.
+
+## First managed-browser evidence, 2026-10-26 20:03–20:08 UTC
+
+The user explicitly authorized a temporary frontend preview, then ongoing frontend exposure for tests and screenshots. The approved preview made real managed-browser captures possible. These are screenshots of the running application, not generated mockups:
+
+- `screens/phase-02-landing-desktop.png`: actual 1440x900 desktop landing.
+- `screens/phase-02-landing-mobile.png`: CSS viewport requested at 390x844; the separate capture worker produced a 500x844 raster. This is not accepted as an exact 390px pixel baseline. The prompt-chip horizontal scrollbar needs specification review, not an assumed defect.
+- `screens/phase-01-buttons.png`: actual component-gallery button variants.
+- `screens/phase-01-fields-attachments.png`: actual fields and attachment-chip demo states, not a live-upload acceptance test.
+- `screens/phase-00-tokens.png`: actual token gallery viewport.
+- `screens/phase-04-browser-fetch-error.png`: actual warm-up failure, deliberately preserved rather than hidden.
+
+The capture worker returned JPEG-encoded bytes even for PNG filenames. The repository evidence copies are decoded and saved as genuine PNGs without altering screenshot pixels.
+
+The warm-up attempt used an explicitly declared synthetic session fixture, but exposed `Illegal invocation` from the native browser fetch function. The client default now binds fetch to globalThis; a receiver-sensitive test covers both GET and POST. The complete four-gate run passed with 108 tests in 13 files and zero warnings. Published regression fix: `1452b6022caaf0e1cc99ced14ef1f80b0bd51116`, exactly two client files; 130 unrelated remote files unchanged.
+
+After rebuilding, the browser no longer throws Illegal invocation. It still cannot fetch the private localhost API from a remote browser, so warm-up/upload end-to-end acceptance is NOT claimed. A disposable synthetic-mock-backed frontend preview is being prepared for that transport test. No production backend credentials, real engine or workspace files are exposed by these previews.
+
+These captures supersede the earlier blanket statement that no screenshots exist, but do not turn the unchecked visual, accessibility, performance or cross-browser acceptance items into passes.
+
+## Phase 5 implementation checkpoint, 2026-10-27
+
+The shell, responsive panels, guarded central keyboard registry, transport intent, typed session subscription, original-request restoration, local layout/title persistence and composable later-phase slots are implemented. No compositor, timeline editing, agent-message sending or final rendering is claimed in this phase.
+
+The source audit fixed viewer-owned fullscreen toggling and reopening the tablet inspector after a new non-empty selection. Regression tests cover both; unrelated fullscreen elements and desktop selection are not overridden.
+
+- [x] Fresh post-audit lint and formatting check passed with zero warnings.
+- [x] Fresh post-audit TypeScript check passed.
+- [x] Fresh post-audit full suite passed: **129 tests across 16 files**.
+- [x] Post-audit production build passed with zero warnings. The initial combined run was interrupted; the restarted build finished with `BUILD_EXIT=0`.
+- [x] Actual managed-browser panel boxes match at 1920x1080, 1440x900 and 1280x800 within one pixel. Evidence: `screens/phase-05-studio-1920.png`, `screens/phase-05-studio-1440.png`, `screens/phase-05-studio-1280.png`. This was direct Studio restoration of a real synthetic session, not automatic warm-up navigation.
+- [x] Browser checks: keyboard agent resize 360 to 368, reload persistence, double-click reset, collapse to agent 48px/timeline 36px/inspector removed, shortcuts dialog/Escape, B tool shortcut and suppression while typing. Evidence: `screens/phase-05-collapsed-1920.png`.
+- [x] Live mock action pill and pause/resume local intent observed. Mobile CSS viewport 390x844 has no horizontal DOM overflow and chat/timeline/edit tabs switch. `screens/phase-05-watch-390-crop.png` is an explicitly cropped 390x844 PNG from the capture worker's 500x844 padded raster, not an uncropped pixel baseline.
+- [ ] Review pulse, original-message visual check and reduced-motion visual checks remain unverified.
+- [ ] Rendered accessibility and cross-browser acceptance: not run.
+
+The prior disposable-preview transport smoke succeeded for HTTP, actual WebSocket events, fixture bytes, binary upload round trip and blocked private paths. This does not establish a successful automatic warm-up-to-Studio navigation; the observed stall remains to investigate. No real backend, user data, workspace files or credentials are exposed in the synthetic preview.
+
+### Browser-found restoration defect
+
+The real browser restored an awaiting-review session at project version 45 but Finish was disabled, because action IDs were discarded. The fix adds optional server-recorded `actionIds` to the REST snapshot. The mock records actual unique action-start events and the shell hydrates those IDs; project version is never used as an action count. Legacy snapshots without history remain supported and do not invent actions. Focused contract/mock/Studio tests pass. Fresh full lint, typecheck and all 133 tests in 16 files pass; the post-fix production build completed with `BUILD_EXIT=0` and zero warnings. The browser reload retest is still pending.
+
+Transport verification at 2026-10-27 00:39 UTC passed actual HTTP, WebSocket project operations, the 8,011,107-byte MP4 fixture, binary upload/download round trip and blocked private paths. Browser runtime errors were empty. The disposable preview subsequently stopped; its historical URL is not a live deployment.

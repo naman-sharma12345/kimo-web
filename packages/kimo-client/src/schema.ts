@@ -169,6 +169,8 @@ export const sessionSnapshotSchema = z.object({
     'failed',
   ]),
   project: projectSchema,
+  // Unique server-recorded agent.action.start IDs, never inferred from version.
+  actionIds: z.array(id).optional(),
   assets: z.array(assetSchema),
   wsUrl: z.string().optional(),
   videoId: id.optional(),

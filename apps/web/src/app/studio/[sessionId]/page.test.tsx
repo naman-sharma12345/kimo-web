@@ -59,16 +59,16 @@ describe('Phase 3 Studio REST restore boundary', () => {
     );
   });
   it.each(['editing', 'awaiting_review'] as const)(
-    'restores %s without inventing an editor',
+    'restores %s into the Phase 5 shell without bypassing REST',
     async (status) => {
       mocks.session.mockResolvedValue(snapshot(status));
       const page = await StudioPage({ params });
       expect(page.type).toBe(StudioRestoreBoundary);
       const markup = renderToStaticMarkup(page);
-      expect(markup).toContain(
-        'the editing interface is not implemented in this build.',
-      );
-      expect(markup).toContain('project version');
+      expect(markup).toContain('data-testid="studio-shell"');
+      expect(markup).toContain('untitled video');
+      expect(markup).toContain('data-testid="studio-viewer"');
+      expect(page.props.snapshot).toEqual(snapshot(status));
     },
   );
   it('shows the exact session error variant for failed sessions', async () => {
