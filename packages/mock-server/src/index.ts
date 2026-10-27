@@ -157,8 +157,11 @@ export function createMockServer(
     if (
       event.t === 'agent.status' ||
       event.t === 'agent.action.start' ||
+      event.t === 'agent.action.progress' ||
       event.t === 'agent.action.end' ||
       event.t === 'agent.message' ||
+      event.t === 'asset.added' ||
+      event.t === 'sam.mask' ||
       event.t === 'error'
     )
       (s.snapshot.agentHistory ??= []).push(structuredClone(event));

@@ -6,7 +6,6 @@ import {
 } from '@kimo/client';
 import type { EditingAPI, EditResult, EditState } from '@/lib/editing/types';
 
-const reason = 'historical cut preview is read-only';
 function frozen<T>(value: T): T {
   if (value !== null && typeof value === 'object') {
     Object.values(value).forEach((child: unknown) => frozen(child));
@@ -19,6 +18,7 @@ export function createReadOnlyEditing(
   live: EditingAPI,
   project: KimoProject,
   assets: readonly Asset[],
+  reason = 'historical cut preview is read-only',
 ): EditingAPI {
   const preview = frozen(projectSchema.parse(project));
   const previewAssets = frozen(assets.map((asset) => assetSchema.parse(asset)));
@@ -47,12 +47,13 @@ export function createReadOnlyEditing(
     }
     return state;
   };
-  const stop = live.subscribe((next) => {
+  let stop: (() => void) | undefined;
+  const publish = (next: EditState) => {
     if (disposed) return;
     source = next;
     state = present(next);
     listeners.forEach((listener) => listener(state));
-  });
+  };
   let close!: () => void;
   const closed = new Promise<void>((resolve) => {
     close = resolve;
@@ -68,9 +69,16 @@ export function createReadOnlyEditing(
   return {
     getState: read,
     subscribe(listener) {
-      if (!disposed) listeners.add(listener);
+      if (!disposed) {
+        listeners.add(listener);
+        if (!stop) stop = live.subscribe(publish);
+      }
       return () => {
         listeners.delete(listener);
+        if (!listeners.size) {
+          stop?.();
+          stop = undefined;
+        }
       };
     },
     async ready() {
@@ -96,7 +104,8 @@ export function createReadOnlyEditing(
     dispose() {
       if (disposed) return;
       disposed = true;
-      stop();
+      stop?.();
+      stop = undefined;
       listeners.clear();
       state = {
         ...state,

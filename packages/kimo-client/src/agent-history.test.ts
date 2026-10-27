@@ -29,7 +29,19 @@ describe('optional presentation history contract', () => {
         title: 'trim',
         args: {},
       },
+      { t: 'agent.action.progress', id: 'a', pct: 0.5 },
       { t: 'agent.action.end', id: 'a', ok: true, durationMs: 1 },
+      {
+        t: 'asset.added',
+        asset: {
+          id: 'web',
+          kind: 'image',
+          source: 'web',
+          name: 'image',
+          url: '/image.jpg',
+        },
+      },
+      { t: 'sam.mask', clipId: 'c', maskAssetId: 'm', previewPolygon: [] },
       {
         t: 'agent.message',
         id: 'm',
@@ -43,13 +55,13 @@ describe('optional presentation history contract', () => {
       sessionSnapshotSchema.parse({ ...snapshot, agentHistory }).agentHistory,
     ).toEqual(agentHistory);
   });
-  it('rejects mutation, resource, progress and malformed history entries', () => {
+  it('rejects mutation, transport, warmup and malformed history entries', () => {
     for (const event of [
       { t: 'project.ops', version: 1, ops: [] },
       { t: 'hello', version: 0 },
-      { t: 'agent.action.progress', id: 'a', pct: 1 },
       { t: 'asset.added', asset: {} },
-      { t: 'sam.mask', clipId: 'c', maskAssetId: 'm', previewPolygon: [] },
+      { t: 'agent.action.progress', id: 'a', pct: 2 },
+      { t: 'sam.mask', clipId: '', maskAssetId: 'm', previewPolygon: [] },
       { t: 'warmup.step', step: 'ready', pct: 1 },
       { t: 'agent.action.start', id: '', args: {} },
     ]) {

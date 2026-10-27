@@ -12,7 +12,7 @@ const variants = {
   },
   session: {
     title: 'kimo couldn’t start this edit',
-    body: 'the editor hit a problem before it began. your files are saved for 24 hours.',
+    body: 'the editor hit a problem before it began. try again to check the session.',
     primary: 'try again',
     secondary: 'start over',
   },

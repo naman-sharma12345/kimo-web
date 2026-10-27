@@ -330,7 +330,7 @@ The first integrated unit run found fixture readiness regressions: 1,037 passed,
 - [x] README, exact 180-second demo and separate marketing-link proposal authored.
 - [ ] v1.0.0 launch tag issued against the intended verified release.
 
-Command palette, device-local review cuts, detached read-only preview, three coachmarks, supplied real beat projections/snapping and timed-caption export models are implemented. Missing producer capabilities remain explicitly unavailable: compare cannot claim synchronized dual compositions, restore lacks an agreed replacement contract, and alternate export/reframe/caption output needs actual service support. No GPU, engine output, audio/caption composition, platform assistive technology, performance or launch pass follows from deterministic tests.
+Command palette, device-local review cuts, detached read-only preview, three coachmarks, supplied real beat projections/snapping and timed-caption export models are implemented. Synchronized dual-composition comparison is now implemented through one controller/clock/renderer and a shared six-decoder pool; real GPU/audio acceptance is still open. Guarded restoration of the exactly reversible existing-operation subset is implemented with reviewed persisted dispatch guards. Universal marker/order/optional-field restoration and alternate export/reframe/caption output still need actual service support. No GPU, engine output, audio/caption composition, platform assistive technology, performance or launch pass follows from deterministic tests.
 
 ### Phase 10 measured source checkpoint
 
@@ -340,3 +340,9 @@ Command palette, device-local review cuts, detached read-only preview, three coa
 - [ ] LCP, INP, CLS, 50-clip FPS and 20-minute memory budgets measured on specified hardware.
 
 These are frontend source and manifest results, not a production launch. Live service contracts, real render/audio/caption fidelity, hosted visual checks, accessibility platforms and deployment remain open as listed above.
+
+### Post-checkpoint cut integration, 2026-10-27
+
+The comparison controller, one-Application split renderer and existing-op guarded restore planner are wired into Studio. The comparison picker exposes a native split slider, current-only audio scope and persistent readiness/exit controls. Both cut presentation modes block editing, agent intent and injected mutating command hooks. Read-only adapters subscribe only for committed consumers, not construction. Empty-current comparison retains the sole renderer. Restore confirmation retains its reviewed guard; an unknown result is not automatically repeated.
+
+The 9c7 hosted checkpoint predates these changes. Its GPU-unavailable result is not comparison acceptance. Focused deterministic tests and the new combined source gate are separate evidence from genuine GPU pixels, actual media/audio, producer acceptance, accessibility platforms and deployment. No launch or universal restore capability is claimed.

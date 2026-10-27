@@ -265,7 +265,7 @@ export function StudioTopBar({
         <DialogContent>
           <DialogTitle>leave the studio?</DialogTitle>
           <DialogDescription>
-            your edit keeps its place for 24 hours.
+            reopen this session link to check its saved state.
           </DialogDescription>
           <DialogActions>
             <Button onClick={() => setLeave(false)}>stay</Button>

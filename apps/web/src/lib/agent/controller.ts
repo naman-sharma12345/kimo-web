@@ -27,8 +27,11 @@ export function createAgentController(
   const isHistoryEvent = (event: ServerEvent) =>
     event.t === 'agent.status' ||
     event.t === 'agent.action.start' ||
+    event.t === 'agent.action.progress' ||
     event.t === 'agent.action.end' ||
     event.t === 'agent.message' ||
+    event.t === 'asset.added' ||
+    event.t === 'sam.mask' ||
     event.t === 'error';
   const listeners = new Set<() => void>();
   const id = () =>
@@ -52,6 +55,9 @@ export function createAgentController(
     },
     system,
     connection(connected: boolean) {
+      // Initial attachment is not a reconnection. Keep unknown until the first
+      // actual ready transport; later false -> true remains a real reconnect.
+      if (state.connected === null && !connected) return;
       publish({ type: 'connectionChanged', connected, id: id() });
     },
     /** Presentation only. Omitted legacy history is a no-op, not an empty log. */
@@ -88,7 +94,7 @@ export function createAgentController(
         ...state,
         ...restored,
         connected: state.connected,
-        assets: state.assets,
+        assets: { ...state.assets, ...restored.assets },
         diagnostics: state.diagnostics,
         items: [
           ...original,

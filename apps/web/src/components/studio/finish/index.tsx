@@ -182,9 +182,7 @@ export function CutPreviewBanner({
         disabled={!onRestore || !!restoreDisabledReason}
         title={
           restoreDisabledReason ??
-          (!onRestore
-            ? 'restoring cuts requires producer support and permission'
-            : undefined)
+          (!onRestore ? 'this cut has no eligible restore plan' : undefined)
         }
         onClick={onRestore}
       >
@@ -203,12 +201,18 @@ export function CompareControl({
   value,
   onChange,
   onEnable,
+  active = false,
+  onExit,
+  status,
 }: {
   cutLabel: string;
   capability: { available: false; reason: string } | { available: true };
   value: number;
   onChange(value: number): void;
   onEnable(): void;
+  active?: boolean;
+  onExit?(): void;
+  status?: string;
 }) {
   return (
     <div className={styles.control}>
@@ -219,18 +223,31 @@ export function CompareControl({
       >
         compare with {cutLabel}
       </Button>
-      {capability.available ? (
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={value}
-          aria-label="comparison split"
-          onChange={(event) => onChange(Number(event.target.value))}
-        />
-      ) : (
+      {active ? (
+        <>
+          <input
+            className={styles.split}
+            type="range"
+            min={0}
+            max={100}
+            value={value}
+            aria-label="comparison split"
+            onChange={(event) => onChange(Number(event.target.value))}
+          />
+          <span>
+            current edit on the left · {cutLabel} on the right · current edit
+            audio only
+          </span>
+          {onExit && (
+            <Button variant="ghost" onClick={onExit}>
+              exit comparison
+            </Button>
+          )}
+          {status && <span role="status">{status}</span>}
+        </>
+      ) : !capability.available ? (
         <span role="status">{capability.reason}</span>
-      )}
+      ) : null}
     </div>
   );
 }

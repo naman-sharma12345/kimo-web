@@ -567,12 +567,15 @@ export const serverEventSchema = z.discriminatedUnion('t', [
   }),
   z.object({ t: z.literal('error'), code: z.string(), message: z.string() }),
 ]);
-/** Optional presentation history only; deliberately excludes edits and resources. */
+/** Recorded presentation, including asset/mask announcements; never replayed as edits or decoding work. */
 export const agentHistoryEventSchema = z.discriminatedUnion('t', [
   serverEventSchema.options[1],
   serverEventSchema.options[2],
+  serverEventSchema.options[3],
   serverEventSchema.options[4],
   serverEventSchema.options[6],
+  serverEventSchema.options[7],
+  serverEventSchema.options[8],
   serverEventSchema.options[10],
 ]);
 export const sessionSnapshotSchema = z.object({

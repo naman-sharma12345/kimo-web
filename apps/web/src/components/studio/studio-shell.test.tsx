@@ -271,7 +271,7 @@ describe('Phase 5 studio shell integration', () => {
     fireEvent.click(screen.getByRole('link', { name: 'kimo home' }));
     expect(screen.getByRole('dialog')).toHaveTextContent('leave the studio?');
     expect(screen.getByRole('dialog')).toHaveTextContent(
-      'your edit keeps its place for 24 hours.',
+      'reopen this session link to check its saved state.',
     );
     expect(mocks.push).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: /^leave$/ }));

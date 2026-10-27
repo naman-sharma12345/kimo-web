@@ -25,6 +25,10 @@
   gap: var(--space-8);
   flex-wrap: wrap;
 }
+.split {
+  width: 100%;
+  accent-color: var(--cream-60);
+}
 .control select {
   background: var(--ink-2);
   color: var(--cream-100);

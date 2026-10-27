@@ -292,3 +292,15 @@ export async function measureTextOverlay(
 }
 /** Alias for the rich layout seam; existing combined measureTextOverlay fields remain. */
 export const measureResolvedTextLayout = measureTextOverlay;
+
+export type {
+  ComparisonInput,
+  ComparisonPhase,
+  ComparisonState,
+  CutComparisonCapability,
+} from './comparison';
+export type {
+  ComparisonFrame,
+  RendererBranch,
+  RendererResourceRequest,
+} from './renderer-types';

@@ -22,12 +22,25 @@ export type SaveStatus =
   | 'unknown'
   | 'unsaved'
   | 'disposed';
+/** Frontend-only reviewed compare-and-swap policy, persisted with the outbox. */
+export interface StrictEditGuard {
+  sessionId: string;
+  projectId: string;
+  version: number;
+  projectIdentity: string;
+  assetsIdentity: string;
+  opsIdentity: string;
+}
+export interface EditGroupOptions {
+  strictGuard?: StrictEditGuard;
+}
 export interface EditGroup {
   id: string;
   label: string;
   source: EditSource;
   ops: Op[];
   status: 'unsent' | 'sending' | 'unknown' | 'failed';
+  strictGuard?: StrictEditGuard;
 }
 export interface AuthoritativeGroup {
   version: number;
@@ -56,6 +69,8 @@ export interface EditReadiness {
   error?: string;
 }
 export interface EditState {
+  /** Optional for compatibility with injected editors; strict dispatch also checks live connectivity. */
+  online?: boolean;
   persistenceStatus: EditPersistenceStatus;
   persistencePending: boolean;
   editingEnabled: boolean;
@@ -137,6 +152,7 @@ export interface EditingAPI {
     ops: readonly Op[],
     label: string,
     source?: EditSource,
+    options?: EditGroupOptions,
   ): Promise<EditResult>;
   undoUser(): Promise<EditResult>;
   redoUser(): Promise<EditResult>;

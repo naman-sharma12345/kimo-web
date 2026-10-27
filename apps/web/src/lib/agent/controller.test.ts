@@ -201,7 +201,15 @@ describe('authoritative presentation restore', () => {
       expect.objectContaining({ text: 'one two' }),
     ]);
     expect(restored.status?.state).toBe('waiting_user');
-    expect(restored.assets).toEqual({});
+    expect(restored.assets).toEqual({
+      web: {
+        id: 'web',
+        kind: 'image',
+        name: 'web',
+        url: '/web',
+        source: 'web',
+      },
+    });
     expect(transport.send).not.toHaveBeenCalled();
     expect(transport.message).not.toHaveBeenCalled();
     expect(transport.attention).not.toHaveBeenCalled();
@@ -261,4 +269,55 @@ describe('authoritative presentation restore', () => {
     controller.restoreHistory([]);
     expect(controller.getSnapshot()).toBe(previous);
   });
+});
+
+it('rehydrates web-image and mask presentation without resource or transport side effects', () => {
+  const { controller, transport } = setup();
+  transport.attention = vi.fn();
+  const asset = {
+    id: 'web-1',
+    kind: 'image' as const,
+    source: 'web' as const,
+    name: 'recorded image',
+    url: '/image.jpg',
+  };
+  const events = [
+    { t: 'asset.added' as const, asset, actionId: 'image-action' },
+    {
+      t: 'sam.mask' as const,
+      clipId: 'c',
+      maskAssetId: 'mask-1',
+      previewPolygon: [],
+    },
+  ];
+  controller.restoreHistory(events);
+  controller.restoreHistory(events);
+  const state = controller.getSnapshot();
+  expect(state.items.filter((item) => item.kind === 'web-images')).toHaveLength(
+    1,
+  );
+  expect(state.items.filter((item) => item.kind === 'sam')).toHaveLength(1);
+  expect(state.assets['web-1']).toEqual(asset);
+  expect(transport.send).not.toHaveBeenCalled();
+  expect(transport.message).not.toHaveBeenCalled();
+  expect(transport.attention).not.toHaveBeenCalled();
+});
+it('does not label initial attachment as reconnected but announces a real subsequent recovery', () => {
+  const { controller } = setup();
+  controller.connection(false);
+  controller.connection(false);
+  controller.connection(true);
+  expect(controller.getSnapshot().items).not.toContainEqual(
+    expect.objectContaining({ text: 'reconnected' }),
+  );
+  controller.connection(false);
+  controller.connection(true);
+  controller.connection(true);
+  expect(
+    controller
+      .getSnapshot()
+      .items.filter(
+        (item) => item.kind === 'system' && item.text === 'reconnected',
+      ),
+  ).toHaveLength(1);
 });

@@ -8,6 +8,8 @@ import {
   type ControllerMetrics,
   type ActionOverlay,
   type SceneGraph,
+  type ComparisonInput,
+  type ComparisonState,
 } from '@kimo/compositor';
 import { useProject } from '@/stores/project';
 import { useSession } from '@/stores/session';
@@ -31,6 +33,11 @@ export interface StudioCompositorHandle {
   getAudioLevel?: CompositorController['getAudioLevel'];
   getAudioCapabilities?: CompositorController['getAudioCapabilities'];
   getCompareCapability?: CompositorController['getCompareCapability'];
+  setComparison?: CompositorController['setComparison'];
+  setComparisonSplit?: CompositorController['setComparisonSplit'];
+  getComparisonState?: CompositorController['getComparisonState'];
+  subscribeComparison?: CompositorController['subscribeComparison'];
+  getCutComparisonCapability?: CompositorController['getCutComparisonCapability'];
   setEditingTextClip?: CompositorController['setEditingTextClip'];
   subscribeAudioLevel?: (listener: () => void) => () => void;
   event: (event: ServerEvent) => void;
@@ -102,6 +109,8 @@ export function StudioCompositor({
   bridgeRef,
   debug = false,
   historical = false,
+  comparison = null,
+  onComparisonChange,
   editing,
   onOpenText,
   activeTextId,
@@ -112,6 +121,8 @@ export function StudioCompositor({
   bridgeRef: React.RefObject<StudioCompositorHandle | null>;
   debug?: boolean;
   historical?: boolean;
+  comparison?: ComparisonInput | null;
+  onComparisonChange?: (state: Readonly<ComparisonState>) => void;
   editing?: EditingAPI | null;
   onOpenText?: (clipId: string) => void;
   activeTextId?: string | null;
@@ -126,8 +137,21 @@ export function StudioCompositor({
   const reducedFade = React.useRef<Animation | null>(null);
   // The lazy renderer and ingress callbacks must see the selected projection,
   // including prop changes before initialization has completed.
-  const projection = React.useRef({ project, assets, historical });
-  projection.current = { project, assets, historical };
+  const projection = React.useRef({
+    project,
+    assets,
+    historical,
+    comparison,
+    onComparisonChange,
+  });
+  projection.current = {
+    project,
+    assets,
+    historical,
+    comparison,
+    onComparisonChange,
+  };
+  const previousComparison = React.useRef<ComparisonInput | null>(null);
   const liveAssets = React.useRef<readonly Asset[]>(assets);
   const wasHistorical = React.useRef(historical);
   const previousAssets = React.useRef(assets);
@@ -199,6 +223,7 @@ export function StudioCompositor({
       useStudio.getState().setPreviewStatus(failure.status);
     };
     let stop: (() => void) | undefined;
+    let stopComparison: (() => void) | undefined;
     const queued = queuedEvents.current;
 
     bridgeRef.current = {
@@ -289,6 +314,12 @@ export function StudioCompositor({
           getAudioLevel: current.getAudioLevel?.bind(current),
           getAudioCapabilities: current.getAudioCapabilities?.bind(current),
           getCompareCapability: current.getCompareCapability?.bind(current),
+          setComparison: current.setComparison?.bind(current),
+          setComparisonSplit: current.setComparisonSplit?.bind(current),
+          getComparisonState: current.getComparisonState?.bind(current),
+          subscribeComparison: current.subscribeComparison?.bind(current),
+          getCutComparisonCapability:
+            current.getCutComparisonCapability?.bind(current),
           setEditingTextClip: (clipId) => {
             if (!disposed && !projection.current.historical)
               current.setEditingTextClip?.(clipId);
@@ -308,12 +339,17 @@ export function StudioCompositor({
         )
           current.updateProject(latestProject);
         stop = observeCompositor(current, () => !projection.current.historical);
+        stopComparison = current.subscribeComparison?.((next) => {
+          if (!disposed) projection.current.onComparisonChange?.(next);
+        });
         if (!projection.current.historical)
           queued.forEach((event) => current.event(event));
         queued.length = 0;
         try {
           await current.init(canvas.current);
           if (disposed) return;
+          current.setComparison?.(projection.current.comparison);
+          previousComparison.current = projection.current.comparison;
           setReady(true);
           useStudio.getState().setPreviewStatus('ready');
           if (host.current)
@@ -335,6 +371,7 @@ export function StudioCompositor({
       useStudio.getState().requestPlayback(false);
       useStudio.getState().setPreviewStatus('legacy');
       stop?.();
+      stopComparison?.();
       bridgeRef.current = null;
       reducedFade.current?.cancel();
       controller.current?.dispose();
@@ -375,6 +412,23 @@ export function StudioCompositor({
     if (exiting) lastSceneAt.current = -Infinity;
   }, [project, assets, historical]);
   React.useEffect(() => {
+    const current = controller.current;
+    if (!current) return;
+    const previous = previousComparison.current;
+    if (
+      comparison &&
+      previous &&
+      comparison.id === previous.id &&
+      comparison.project === previous.project &&
+      comparison.assets === previous.assets
+    ) {
+      current.setComparisonSplit?.(comparison.split);
+    } else current.setComparison?.(comparison);
+    previousComparison.current = comparison;
+    const next = current.getComparisonState?.();
+    if (next) projection.current.onComparisonChange?.(next);
+  }, [comparison]);
+  React.useEffect(() => {
     const node = host.current;
     if (!node) return;
     const resize = () => {
@@ -400,7 +454,7 @@ export function StudioCompositor({
     if (activeTextId) useStudio.getState().requestPlayback(false);
   }, [activeTextId]);
   const transformStart = useViewerTransform(
-    historical ? null : editing,
+    historical || comparison ? null : editing,
     scale,
     setError,
   );
@@ -418,6 +472,7 @@ export function StudioCompositor({
       data-zoom={zoom}
       data-rendered-frame={ready ? scene?.frame : undefined}
       data-preview-ready={ready}
+      data-comparison={comparison ? 'active' : undefined}
       data-preview-status={fatal?.status ?? (ready ? 'ready' : 'initializing')}
       data-preparing={!fatal && !scene}
     >
@@ -430,7 +485,7 @@ export function StudioCompositor({
           }
           data-testid="compositor-canvas"
         />
-        {!historical ? (
+        {!historical && !comparison ? (
           <CompositorOverlay
             project={project}
             assets={assets}
@@ -449,7 +504,7 @@ export function StudioCompositor({
             }}
           />
         ) : null}
-        {!historical && editing && activeTextId ? (
+        {!historical && !comparison && editing && activeTextId ? (
           <ViewerTextLayer
             clipId={activeTextId}
             project={project}

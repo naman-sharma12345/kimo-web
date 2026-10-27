@@ -211,3 +211,32 @@ describe('coachmark and SRT lifecycle', () => {
     vi.useRealTimers();
   });
 });
+
+describe('active comparison controls', () => {
+  it('exposes a native labeled split and exit, with truthful readiness and audio scope', () => {
+    const change = vi.fn();
+    const exit = vi.fn();
+    render(
+      <CompareControl
+        cutLabel="cut 2"
+        capability={{ available: true }}
+        value={50}
+        onChange={change}
+        onEnable={vi.fn()}
+        active
+        onExit={exit}
+        status="preparing both cut frames"
+      />,
+    );
+    fireEvent.change(screen.getByRole('slider', { name: 'comparison split' }), {
+      target: { value: '75' },
+    });
+    expect(change).toHaveBeenCalledWith(75);
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'preparing both cut frames',
+    );
+    expect(screen.getByText(/current edit audio only/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'exit comparison' }));
+    expect(exit).toHaveBeenCalledOnce();
+  });
+});

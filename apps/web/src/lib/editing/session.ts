@@ -18,11 +18,15 @@ import {
 import {
   EditPersistenceError,
   validateOutbox,
+  editIdentity,
+  strictEditGuardSchema,
   type EditOutboxBinding,
   type EditOutboxRecord,
 } from './persistence';
 import type {
   EditReadiness,
+  StrictEditGuard,
+  EditGroupOptions,
   EditPersistenceStatus,
   AuthoritativeGroup,
   BeginEdit,
@@ -113,11 +117,13 @@ export function createEditingSession(context: EditContext): EditingAPI {
           acceptedVersion,
           intentBaseline,
           intentOps,
+          strictGuard,
         }) => ({
           id,
           label,
           source,
           ops,
+          ...(strictGuard ? { strictGuard } : {}),
           status: status === 'sending' ? ('unknown' as const) : status,
           ...(baseVersion === undefined ? {} : { baseVersion }),
           ...(acceptedVersion === undefined ? {} : { acceptedVersion }),
@@ -154,6 +160,50 @@ export function createEditingSession(context: EditContext): EditingAPI {
           : 'Editing storage is still loading',
       );
   }
+  function makeStrictGuard(
+    project: KimoProject,
+    ops: readonly Op[],
+  ): StrictEditGuard {
+    return {
+      sessionId: context.sessionId,
+      projectId: project.id,
+      version: project.version,
+      projectIdentity: editIdentity(project),
+      assetsIdentity: editIdentity(assets),
+      opsIdentity: editIdentity(ops),
+    };
+  }
+  function assertStrict(
+    guard: StrictEditGuard,
+    ops: readonly Op[],
+    own?: Pending,
+  ) {
+    strictEditGuardSchema.parse(guard);
+    if (
+      guard.sessionId !== context.sessionId ||
+      guard.projectId !== acknowledged.id ||
+      guard.version !== acknowledged.version ||
+      guard.projectIdentity !== editIdentity(acknowledged) ||
+      guard.assetsIdentity !== editIdentity(assets) ||
+      guard.opsIdentity !== editIdentity(ops)
+    )
+      throw new Error(
+        'Restore review is stale; re-plan and review against the current project and assets',
+      );
+    if (
+      !online() ||
+      !storageAvailable ||
+      persistenceStatus !== 'ready' ||
+      (!own && dirtyGeneration !== savedGeneration) ||
+      draft ||
+      suggestions.length ||
+      pending.some((g) => g !== own) ||
+      [...received.keys()].some((version) => version > acknowledged.version)
+    )
+      throw new Error(
+        'Restore requires online, saved, ready authority without pending edits or drafts',
+      );
+  }
   function projection(): KimoProject {
     let project = acknowledged;
     for (const group of pending) {
@@ -176,6 +226,11 @@ export function createEditingSession(context: EditContext): EditingAPI {
       )
         continue;
       try {
+        if (
+          group.strictGuard &&
+          group.strictGuard.projectIdentity !== editIdentity(acknowledged)
+        )
+          continue;
         const optimistic = group.intentBaseline
           ? rebaseCommands(
               group.intentBaseline,
@@ -225,6 +280,7 @@ export function createEditingSession(context: EditContext): EditingAPI {
                     ? 'pending'
                     : 'saved';
     cachedState = {
+      online: online(),
       persistenceStatus: disposed ? 'disposed' : persistenceStatus,
       persistencePending: dirtyGeneration !== savedGeneration,
       editingEnabled:
@@ -370,6 +426,11 @@ export function createEditingSession(context: EditContext): EditingAPI {
       label: group.label,
       author: 'user',
     });
+    if (group.strictGuard)
+      entry.strict = {
+        project: applyOps(before, group.ops, version),
+        assetsIdentity: group.strictGuard.assetsIdentity,
+      };
     if (before.version !== version - 1) entry.available = false;
     if (group.history) {
       history.push(entry);
@@ -536,6 +597,8 @@ export function createEditingSession(context: EditContext): EditingAPI {
       while (!disposed && pending.includes(group) && !settled.has(group.id)) {
         if (!storageAvailable)
           throw new Error('Durable editing storage unavailable');
+        if (group.strictGuard)
+          assertStrict(group.strictGuard, group.ops, group);
         const base = clone(acknowledged);
         const ops = validateCommands(
           acknowledged,
@@ -563,6 +626,8 @@ export function createEditingSession(context: EditContext): EditingAPI {
           await persist();
           return false;
         }
+        if (group.strictGuard)
+          assertStrict(group.strictGuard, group.ops, group);
         if (base.version === acknowledged.version) return true;
       }
       return false;
@@ -578,6 +643,8 @@ export function createEditingSession(context: EditContext): EditingAPI {
           return;
         if (!storageAvailable)
           throw new Error('Durable editing storage unavailable');
+        if (group.strictGuard)
+          assertStrict(group.strictGuard, group.ops, group);
         if (!online() || group.baseVersion !== acknowledged.version) continue;
         dispatched = true;
         return context.client.ops(
@@ -596,6 +663,10 @@ export function createEditingSession(context: EditContext): EditingAPI {
         if (!(cause instanceof ApiError) || cause.status !== 409) throw cause;
         dispatched = false;
         await refresh();
+        if (group.strictGuard)
+          throw new Error(
+            'Restore conflict (409); re-plan and review before another submission',
+          );
         group.suppressProjection = false;
         response = await invoke();
       }
@@ -665,6 +736,8 @@ export function createEditingSession(context: EditContext): EditingAPI {
         : rejected
           ? 'failed'
           : 'unknown';
+      if (group.strictGuard && (!dispatched || rejected))
+        pending = pending.filter((item) => item !== group);
       if (storageAvailable) error = message(cause);
       await persist().catch(() => undefined);
       emit();
@@ -695,8 +768,10 @@ export function createEditingSession(context: EditContext): EditingAPI {
     id = makeId(),
     normalHistory = true,
     onAck?: Pending['onAck'],
+    strictGuard?: StrictEditGuard,
   ): Promise<EditResult> {
     assertEditable();
+    if (strictGuard) assertStrict(strictGuard, ops);
     if (!ops.length) return Promise.resolve({ id, status: 'cancelled' });
     const baseline = projection();
     const parsed = validateCommands(baseline, ops, assets);
@@ -720,6 +795,11 @@ export function createEditingSession(context: EditContext): EditingAPI {
       history: normalHistory,
       onAck,
     };
+    if (strictGuard) {
+      group.strictGuard = clone(strictGuard);
+      delete group.intentBaseline;
+      delete group.intentOps;
+    }
     pending.push(group);
     if (normalHistory) userRedo.length = 0;
     persist();
@@ -808,9 +888,12 @@ export function createEditingSession(context: EditContext): EditingAPI {
     ops: readonly Op[],
     label: string,
     source: BeginEdit['source'] = 'inspector',
+    options?: EditGroupOptions,
   ) {
+    const guard = options?.strictGuard ? clone(options.strictGuard) : undefined;
+    if (guard) assertStrict(guard, ops);
     await readiness;
-    return enqueue(ops, label, source);
+    return enqueue(ops, label, source, makeId(), true, undefined, guard);
   }
   async function undoUser(): Promise<EditResult> {
     await readiness;
@@ -819,8 +902,17 @@ export function createEditingSession(context: EditContext): EditingAPI {
     if (!entry || pending.length || draft)
       return { id: '', status: 'cancelled' };
     try {
+      if (
+        entry.strict &&
+        (editIdentity(acknowledged) !== editIdentity(entry.strict.project) ||
+          editIdentity(assets) !== entry.strict.assetsIdentity)
+      )
+        throw new Error(
+          'Strict restore history is stale; newer edits or assets must be preserved',
+        );
+      const ops = historyOps(acknowledged, entry, 'undo');
       return await enqueue(
-        historyOps(acknowledged, entry, 'undo'),
+        ops,
         `undo ${entry.label}`,
         'history',
         makeId(),
@@ -829,6 +921,7 @@ export function createEditingSession(context: EditContext): EditingAPI {
           userUndo.pop();
           userRedo.push({ ...compensation, label: entry.label });
         },
+        entry.strict ? makeStrictGuard(acknowledged, ops) : undefined,
       );
     } catch (cause) {
       error = message(cause);
@@ -843,8 +936,17 @@ export function createEditingSession(context: EditContext): EditingAPI {
     if (!entry || pending.length || draft)
       return { id: '', status: 'cancelled' };
     try {
+      if (
+        entry.strict &&
+        (editIdentity(acknowledged) !== editIdentity(entry.strict.project) ||
+          editIdentity(assets) !== entry.strict.assetsIdentity)
+      )
+        throw new Error(
+          'Strict restore history is stale; newer edits or assets must be preserved',
+        );
+      const ops = historyOps(acknowledged, entry, 'undo');
       return await enqueue(
-        historyOps(acknowledged, entry, 'undo'),
+        ops,
         `redo ${entry.label}`,
         'history',
         makeId(),
@@ -853,6 +955,7 @@ export function createEditingSession(context: EditContext): EditingAPI {
           userRedo.pop();
           userUndo.push({ ...compensation, label: entry.label });
         },
+        entry.strict ? makeStrictGuard(acknowledged, ops) : undefined,
       );
     } catch (cause) {
       error = message(cause);

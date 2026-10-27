@@ -1,3 +1,5 @@
+import * as React from 'react';
+import { render } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { createEditingSession } from '@/lib/editing/session';
 import { assets, fixture, memoryStorage } from '@/lib/editing/test-fixtures';
@@ -123,6 +125,45 @@ describe('historical editing facade', () => {
     await live.receiveAuthoritative({ version: 10, ops: [] });
     expect(listener).not.toHaveBeenCalled();
     expect(proxy.getState().acknowledgedVersion).toBe(9);
+    live.dispose();
+    await live.closed();
+  });
+});
+
+describe('read-only subscription ownership', () => {
+  it('constructs without side effects and only retains committed subscriptions through StrictMode replay', async () => {
+    const { live, proxy } = await setup();
+    let active = 0;
+    const original = live.subscribe;
+    vi.spyOn(live, 'subscribe').mockImplementation((listener) => {
+      active++;
+      const stop = original(listener);
+      return () => {
+        active--;
+        stop();
+      };
+    });
+    createReadOnlyEditing(live, fixture(), assets);
+    expect(active).toBe(0);
+    function Consumer() {
+      const view = React.useMemo(
+        () => createReadOnlyEditing(live, fixture(), assets),
+        [],
+      );
+      React.useEffect(() => view.subscribe(() => undefined), [view]);
+      return null;
+    }
+    const result = render(
+      React.createElement(
+        React.StrictMode,
+        null,
+        React.createElement(Consumer),
+      ),
+    );
+    expect(active).toBe(1);
+    result.unmount();
+    expect(active).toBe(0);
+    proxy.dispose();
     live.dispose();
     await live.closed();
   });

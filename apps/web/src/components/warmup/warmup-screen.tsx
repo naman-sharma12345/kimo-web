@@ -369,7 +369,7 @@ export function WarmupScreen({ sessionId }: { sessionId: string }) {
         <DialogContent>
           <DialogTitle>stop this edit?</DialogTitle>
           <DialogDescription>
-            your files stay uploaded for 24 hours.
+            you’ll return to the start page. this requests a pause.
           </DialogDescription>
           <DialogActions>
             <Button onClick={() => setCancel(false)}>keep going</Button>

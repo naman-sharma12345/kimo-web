@@ -35,6 +35,7 @@ import { StudioTransport } from './transport';
 export interface StudioSlots {
   viewer?: React.ReactNode;
   reviewOverlay?: React.ReactNode;
+  viewerActions?: React.ReactNode;
   transport?: React.ReactNode;
   timeline?: React.ReactNode;
   timelineActions?: React.ReactNode;
@@ -244,6 +245,7 @@ export function ViewerPanel({
       )}
       {slots.reviewOverlay}
       <div className="studio-viewer-overlay">
+        {slots.viewerActions}
         <span>
           {project.width} × {project.height} · {project.fps} fps
         </span>

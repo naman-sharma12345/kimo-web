@@ -3,6 +3,7 @@ import * as React from 'react';
 import { analytics, diagnosticsTiming, assetCounts } from '@/lib/diagnostics';
 import { useRouter } from 'next/navigation';
 import type { SessionSnapshot } from '@kimo/client';
+import type { ComparisonState } from '@kimo/compositor';
 import { api } from '@/lib/api';
 import { useProject } from '@/stores/project';
 import { useEditing } from '@/stores/editing';
@@ -19,6 +20,15 @@ import {
   projectBeats,
 } from '@/lib/studio-finish';
 import { createReadOnlyEditing } from '@/lib/studio-finish/readonly-editing';
+import {
+  planCutRestore,
+  type CutRestorePlan,
+} from '@/lib/studio-finish/cut-restore';
+import {
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
+} from '@/components/ui/popover';
 import {
   CommandPalette,
   CutsMenu,
@@ -158,6 +168,20 @@ export function StudioShell({
   const [previewCut, setPreviewCut] = React.useState<LocalCut | null>(null);
   const previewCutRef = React.useRef<LocalCut | null>(null);
   previewCutRef.current = previewCut;
+  const [comparisonCut, setComparisonCut] = React.useState<LocalCut | null>(
+    null,
+  );
+  const comparisonCutRef = React.useRef<LocalCut | null>(null);
+  comparisonCutRef.current = comparisonCut;
+  const [comparisonSplit, setComparisonSplit] = React.useState(0.5);
+  const [comparisonStatus, setComparisonStatus] =
+    React.useState<Readonly<ComparisonState> | null>(null);
+  const [restoreReview, setRestoreReview] = React.useState<{
+    cut: LocalCut;
+    plan: Extract<CutRestorePlan, { available: true }>;
+  } | null>(null);
+  const [restorePending, setRestorePending] = React.useState(false);
+  const restoreLock = React.useRef(false);
   const [cuts, setCuts] = React.useState<readonly LocalCut[]>([]);
   const cutsStore = React.useRef<ReturnType<typeof createCutStore> | null>(
     null,
@@ -187,24 +211,62 @@ export function StudioShell({
   );
   const project = preview?.project ?? liveProject;
   const assets = preview?.assets ?? liveAssets;
+  const comparisonProjection = React.useMemo(
+    () => (comparisonCut ? cutPreviewState(comparisonCut) : null),
+    [comparisonCut],
+  );
+  const comparisonAssets = React.useMemo(
+    () =>
+      comparisonProjection
+        ? withBuiltinAssets(comparisonProjection.assets)
+        : [],
+    [comparisonProjection],
+  );
+  const comparisonInput = React.useMemo(
+    () =>
+      comparisonCut && comparisonProjection
+        ? {
+            id: comparisonCut.id,
+            project: comparisonProjection.project,
+            assets: comparisonAssets,
+            split: comparisonSplit,
+          }
+        : null,
+    [comparisonCut, comparisonProjection, comparisonAssets, comparisonSplit],
+  );
+  const readonlyView = !!previewCut || !!comparisonCut;
   const detectedBeats = React.useMemo(
     () => projectBeats(project, beatDetections),
     [project, beatDetections],
   );
   const editingSession = React.useMemo(
     () =>
-      preview && liveEditingSession
+      readonlyView && liveEditingSession
         ? createReadOnlyEditing(
             liveEditingSession,
-            preview.project,
-            preview.assets,
+            project,
+            assets,
+            comparisonCut
+              ? 'comparison is read-only'
+              : 'historical cut preview is read-only',
           )
         : liveEditingSession,
-    [preview, liveEditingSession],
+    [readonlyView, comparisonCut, project, assets, liveEditingSession],
   );
-  const editingState = preview
+  const editingState = readonlyView
     ? (editingSession?.getState() ?? liveEditingState)
     : liveEditingState;
+  const restorePlan = React.useMemo(
+    () =>
+      previewCut && liveEditingState
+        ? planCutRestore(
+            { sessionId, ...liveEditingState },
+            previewCut,
+            liveEditingState.assets,
+          )
+        : null,
+    [sessionId, previewCut, liveEditingState, liveAssets],
+  );
   React.useEffect(() => {
     let storage: LocalStorage | undefined;
     try {
@@ -218,6 +280,9 @@ export function StudioShell({
     setCuts(store.list(sessionId));
     setRecentPrompts(rememberPrompt(storage, ''));
     setPreviewCut(null);
+    setComparisonCut(null);
+    setComparisonStatus(null);
+    setRestoreReview(null);
     return () => {
       if (cutsStore.current === store) cutsStore.current = null;
     };
@@ -829,7 +894,7 @@ export function StudioShell({
   );
   const dispatchAgent = React.useCallback(
     (kind: 'pause' | 'resume' | 'stop') => {
-      if (previewCutRef.current) {
+      if (previewCutRef.current || comparisonCutRef.current) {
         setActivity('this cut is read-only.');
         return;
       }
@@ -887,7 +952,31 @@ export function StudioShell({
   const routeShortcut = React.useCallback(
     (id: string, allowDialog = false) => {
       const current = useStudio.getState();
-      if (commands.keyboard?.(id) === true) return true;
+      if (
+        (previewCutRef.current || comparisonCutRef.current) &&
+        [
+          'add-text',
+          'edit-v',
+          'edit-d',
+          'delete',
+          'delete-lift',
+          'split',
+          'undo',
+          'redo',
+          'submit',
+          'pause-agent',
+        ].includes(id)
+      ) {
+        setActivity(
+          'this cut is read-only. return to the current edit to make changes.',
+        );
+        return true;
+      }
+      if (
+        !(previewCutRef.current || comparisonCutRef.current) &&
+        commands.keyboard?.(id) === true
+      )
+        return true;
       if (id === 'escape' && current.fullscreen) {
         useStudio.setState({ fullscreen: false });
         return true;
@@ -926,26 +1015,6 @@ export function StudioShell({
         const shuttle = id === 'shuttle-j' ? -1 : id === 'shuttle-l' ? 1 : 0;
         current.requestPlayback(shuttle !== 0, shuttle);
         return;
-      }
-      if (
-        previewCutRef.current &&
-        [
-          'add-text',
-          'edit-v',
-          'edit-d',
-          'delete',
-          'delete-lift',
-          'split',
-          'undo',
-          'redo',
-          'submit',
-          'pause-agent',
-        ].includes(id)
-      ) {
-        setActivity(
-          'this cut is read-only. return to the current edit to make changes.',
-        );
-        return true;
       }
       if (id === 'add-text') {
         const edit = useEditing.getState().session;
@@ -1088,6 +1157,7 @@ export function StudioShell({
   const uploadFiles = async (files: readonly File[]) => {
     if (
       previewCutRef.current ||
+      comparisonCutRef.current ||
       useEditing.getState().state?.persistenceStatus === 'locked'
     )
       throw new Error('this view is read-only');
@@ -1295,7 +1365,7 @@ export function StudioShell({
       ) : undefined),
   };
   const finish = () => {
-    if (previewCutRef.current) {
+    if (previewCutRef.current || comparisonCutRef.current) {
       setActivity('return to the current edit to render.');
       return;
     }
@@ -1339,7 +1409,14 @@ export function StudioShell({
     expectedProjectVersion: number;
     title: string;
   }) => {
-    if (approvalLock.current || approvalUnknown) return;
+    if (
+      previewCutRef.current ||
+      comparisonCutRef.current ||
+      restoreLock.current ||
+      approvalLock.current ||
+      approvalUnknown
+    )
+      return;
     const life = approvalLife.current;
     if (!life || life.signal.aborted) return;
     approvalLock.current = true;
@@ -1483,6 +1560,7 @@ export function StudioShell({
   const sendConversation = (text: string) => {
     if (
       previewCutRef.current ||
+      comparisonCutRef.current ||
       useEditing.getState().state?.persistenceStatus === 'locked'
     ) {
       setActivity('this view is read-only.');
@@ -1624,13 +1702,14 @@ export function StudioShell({
               : 'composer'
           }
           disabled={
-            !!previewCut || editingState?.persistenceStatus === 'locked'
+            readonlyView || editingState?.persistenceStatus === 'locked'
           }
           parentHandlesModEnter={true}
           onEscape={focusTimeline}
           onSend={async (input) => {
             if (
               previewCutRef.current ||
+              comparisonCutRef.current ||
               useEditing.getState().state?.persistenceStatus === 'locked'
             )
               throw new Error('this view is read-only');
@@ -1749,7 +1828,7 @@ export function StudioShell({
       <StudioTopBar
         projectTitle={projectTitle}
         onTitleChange={setProjectTitle}
-        readOnly={!!previewCut}
+        readOnly={readonlyView}
         projectActions={
           <CutsMenu
             cuts={cuts}
@@ -1766,6 +1845,8 @@ export function StudioShell({
               }
               useStudio.getState().requestPlayback(false);
               setTextEditingId(null);
+              setComparisonCut(null);
+              setRestoreReview(null);
               setPreviewCut(cut);
               useStudio.getState().seek(0);
             }}
@@ -1775,22 +1856,26 @@ export function StudioShell({
         sessionId={sessionId}
         commands={{
           ...commands,
-          pauseAgent: commands.pauseAgent ?? pauseAgent,
+          pauseAgent: readonlyView
+            ? () => setActivity('this view is read-only.')
+            : (commands.pauseAgent ?? pauseAgent),
           fullscreen,
-          undo:
-            commands.undo ??
-            (editingState?.canUndo
-              ? () => {
-                  void editingSession?.undoUser();
-                }
-              : undefined),
-          redo:
-            commands.redo ??
-            (editingState?.canRedo
-              ? () => {
-                  void editingSession?.redoUser();
-                }
-              : undefined),
+          undo: readonlyView
+            ? undefined
+            : (commands.undo ??
+              (editingState?.canUndo
+                ? () => {
+                    void editingSession?.undoUser();
+                  }
+                : undefined)),
+          redo: readonlyView
+            ? undefined
+            : (commands.redo ??
+              (editingState?.canRedo
+                ? () => {
+                    void editingSession?.redoUser();
+                  }
+                : undefined)),
           finish,
         }}
         togglePanel={togglePanel}
@@ -1806,9 +1891,131 @@ export function StudioShell({
         <CutPreviewBanner
           cut={previewCut}
           onExit={() => setPreviewCut(null)}
-          restoreDisabledReason="restoring cuts requires a verified backend capability; the live edit has not been changed."
+          restoreDisabledReason={
+            !restorePlan?.available
+              ? (restorePlan?.reasons
+                  .map((reason) => reason.message)
+                  .join('; ') ?? 'live editing is not ready')
+              : restorePending
+                ? 'restore is pending'
+                : undefined
+          }
+          onRestore={() => {
+            const editor = useEditing.getState().session;
+            if (!editor || restoreLock.current) return;
+            const current = editor.getState();
+            const plan = planCutRestore(
+              { sessionId, ...current },
+              previewCut,
+              current.assets,
+            );
+            if (!plan.available) {
+              setBoundary(
+                plan.reasons.map((reason) => reason.message).join('; '),
+              );
+              return;
+            }
+            if (plan.noop) {
+              setActivity(
+                'this cut already matches the current edit. no changes were sent.',
+              );
+              return;
+            }
+            setRestoreReview({ cut: previewCut, plan });
+          }}
         />
       )}
+      {comparisonCut && (
+        <section
+          className="studio-storage-notice"
+          aria-label="read-only comparison"
+        >
+          comparing current edit with {comparisonCut.label} · read-only ·
+          current edit audio only
+          <span role="status">
+            {comparisonStatus?.reason ??
+              (comparisonStatus?.phase === 'ready'
+                ? 'both cut frames ready'
+                : 'preparing both cut frames')}
+          </span>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setComparisonCut(null);
+              setComparisonStatus(null);
+            }}
+          >
+            exit comparison
+          </Button>
+        </section>
+      )}
+      <Dialog
+        open={!!restoreReview}
+        onOpenChange={(open) => {
+          if (!open && !restoreLock.current) setRestoreReview(null);
+        }}
+      >
+        <DialogContent>
+          <DialogTitle>restore {restoreReview?.cut.label}</DialogTitle>
+          <DialogDescription>
+            replace the current edit with this device-local cut using existing
+            edit operations. the reviewed version must still match. accepted
+            changes can be undone only while their exact guarded state still
+            matches.
+          </DialogDescription>
+          <DialogActions>
+            <Button
+              variant="ghost"
+              disabled={restorePending}
+              onClick={() => setRestoreReview(null)}
+            >
+              cancel
+            </Button>
+            <Button
+              disabled={restorePending}
+              onClick={async () => {
+                if (!restoreReview || restoreLock.current) return;
+                const editor = useEditing.getState().session;
+                if (!editor) return;
+                restoreLock.current = true;
+                setRestorePending(true);
+                const reviewed = restoreReview;
+                try {
+                  const result = await editor.editGroup(
+                    reviewed.plan.ops,
+                    `restore ${reviewed.cut.label}`,
+                    'history',
+                    reviewed.plan.options,
+                  );
+                  setRestoreReview(null);
+                  if (result.status === 'acknowledged') {
+                    setPreviewCut(null);
+                    setActivity(
+                      `${reviewed.cut.label} restored and acknowledged.`,
+                    );
+                  } else
+                    setBoundary(
+                      result.status === 'unknown'
+                        ? 'restore acceptance is unknown. do not repeat it; reconcile the current edit first.'
+                        : (result.error ??
+                            `restore ${result.status}. the saved edit has not been confirmed.`),
+                    );
+                } catch {
+                  setRestoreReview(null);
+                  setBoundary(
+                    'restore did not return a confirmed result. reconcile the current edit before trying again.',
+                  );
+                } finally {
+                  restoreLock.current = false;
+                  setRestorePending(false);
+                }
+              }}
+            >
+              restore this cut
+            </Button>
+          </DialogActions>
+        </DialogContent>
+      </Dialog>
       {editingState && editingState.persistenceStatus !== 'ready' && (
         <div className="studio-storage-notice" role="status">
           {editingState.persistenceStatus === 'hydrating'
@@ -1842,34 +2049,101 @@ export function StudioShell({
                     requestId={previewCut ? null : (latestReview?.id ?? null)}
                     onWatch={presentation.onPlayFromStart}
                   />
-                  {cuts[0] && (
-                    <div className="studio-compare-control">
-                      <CompareControl
-                        cutLabel={cuts[0].label}
-                        capability={{
-                          available: false,
-                          reason:
-                            'synchronized cut comparison is not available from this renderer.',
-                        }}
-                        value={50}
-                        onChange={() => undefined}
-                        onEnable={() => undefined}
-                      />
-                    </div>
-                  )}
                 </>
+              ),
+              viewerActions: cuts.length ? (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button variant="ghost" size="xs">
+                      compare cuts
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent aria-label="cut comparison controls">
+                    <label>
+                      compare current edit with
+                      <select
+                        aria-label="comparison cut"
+                        value={comparisonCut?.id ?? ''}
+                        onChange={(event) => {
+                          const cut = cuts.find(
+                            (item) => item.id === event.target.value,
+                          );
+                          if (!cut) return;
+                          useStudio.getState().requestPlayback(false);
+                          setPreviewCut(null);
+                          setRestoreReview(null);
+                          setTextEditingId(null);
+                          setComparisonCut(cut);
+                        }}
+                        disabled={
+                          !!slots.viewer ||
+                          state.previewStatus !== 'ready' ||
+                          !compositor.current?.getCutComparisonCapability?.()
+                            .available
+                        }
+                      >
+                        <option value="">choose a cut</option>
+                        {cuts.map((cut) => (
+                          <option key={cut.id} value={cut.id}>
+                            {cut.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <CompareControl
+                      cutLabel={comparisonCut?.label ?? cuts[0]?.label ?? 'cut'}
+                      capability={
+                        slots.viewer
+                          ? {
+                              available: false,
+                              reason:
+                                'comparison is unavailable for this custom viewer.',
+                            }
+                          : (compositor.current?.getCutComparisonCapability?.() ?? {
+                              available: false,
+                              reason: 'comparison requires a ready renderer.',
+                            })
+                      }
+                      value={comparisonSplit * 100}
+                      onChange={(value) => setComparisonSplit(value / 100)}
+                      active={!!comparisonCut}
+                      onExit={() => {
+                        setComparisonCut(null);
+                        setComparisonStatus(null);
+                      }}
+                      status={
+                        comparisonStatus?.reason ??
+                        (comparisonStatus?.phase === 'preparing'
+                          ? 'preparing both cut frames'
+                          : comparisonStatus?.approximations.join('; '))
+                      }
+                      onEnable={() => {
+                        useStudio.getState().requestPlayback(false);
+                        setTextEditingId(null);
+                        setPreviewCut(null);
+                        if (cuts[0]) setComparisonCut(cuts[0]);
+                      }}
+                    />
+                  </PopoverContent>
+                </Popover>
+              ) : (
+                slots.viewerActions
               ),
               viewer:
                 slots.viewer ??
-                (Object.keys(project.clips).length ? (
+                (Object.keys(project.clips).length ||
+                comparisonCut ||
+                cuts.length ? (
                   <StudioCompositor
                     key={sessionId}
                     project={project}
                     assets={rendererAssets}
                     bridgeRef={compositor}
                     historical={!!previewCut}
-                    editing={previewCut ? null : editingSession}
-                    onOpenText={previewCut ? undefined : setTextEditingId}
+                    comparison={comparisonInput}
+                    onComparisonChange={setComparisonStatus}
+                    editing={readonlyView ? null : editingSession}
+                    onOpenText={readonlyView ? undefined : setTextEditingId}
                     activeTextId={textEditingId}
                     onTextFinish={() => setTextEditingId(null)}
                     debug={
@@ -1982,7 +2256,7 @@ export function StudioShell({
           {
             id: 'add-text',
             label: 'add text',
-            disabledReason: previewCut ? 'this cut is read-only' : undefined,
+            disabledReason: readonlyView ? 'this view is read-only' : undefined,
             run: () => {
               routeShortcut('add-text', true);
             },
@@ -1990,7 +2264,7 @@ export function StudioShell({
           {
             id: 'split',
             label: 'split',
-            disabledReason: previewCut ? 'this cut is read-only' : undefined,
+            disabledReason: readonlyView ? 'this view is read-only' : undefined,
             run: () => {
               routeShortcut('split', true);
             },
@@ -2006,7 +2280,7 @@ export function StudioShell({
           {
             id: 'captions',
             label: 'toggle captions',
-            disabledReason: previewCut ? 'this cut is read-only' : undefined,
+            disabledReason: readonlyView ? 'this view is read-only' : undefined,
             run: () => {
               const edit = useEditing.getState().session;
               if (!edit) return;

@@ -1,5 +1,14 @@
 import type { Approximation, SceneGraph } from './types';
+/** Presentation branch only; persisted project/clip identities remain unchanged. */
+export type RendererBranch = 'current' | 'historical';
+export interface ComparisonFrame {
+  current: SceneGraph;
+  historical: SceneGraph;
+  /** Viewport-space wipe position, finite and clamped to 0..1 by the caller. */
+  split: number;
+}
 export interface RendererResourceRequest {
+  branch?: RendererBranch;
   clipId: string;
   assetId: string;
   sourceTime: number;
@@ -63,6 +72,11 @@ export interface SceneRenderer {
   init(options: RendererInit): Promise<void>;
   resize(width: number, height: number, resolution?: number): void;
   render(scene: SceneGraph, options?: RenderOptions): Promise<RenderResult>;
+  /** Optional dual-scene submission in the SAME renderer/context, with one presentation. */
+  renderComparison?(
+    frame: ComparisonFrame,
+    options?: RenderOptions,
+  ): Promise<RenderResult>;
   /** Cancels deferred resource/font work while retaining the last good frame. */
   cancelPending?(): void;
   destroy(): void;

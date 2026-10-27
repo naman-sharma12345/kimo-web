@@ -1,4 +1,6 @@
-# JS budgets: PASS
+# JS budgets: PASS (published hardening checkpoint)
+
+This table describes the previously measured hardening checkpoint, not the subsequent cut-comparison/restore integration. A new production build and independently gzipped budget report are required for that source revision.
 
 Build: IK2U9ZYn_I2G930stt-S8; Node v24.22.1; zlib 1.3.2.1-motley-285e94b.
 decimal KB; independent gzip level 9; modern effective initial JS including all framework/runtime/shared and required automatic imports; conditional nomodule polyfills separately reported; external JS only

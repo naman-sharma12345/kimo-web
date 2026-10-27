@@ -13,6 +13,7 @@ export interface HistoryRecord {
   actionId?: string;
   changes: Change[];
   available: boolean;
+  strict?: { project: KimoProject; assetsIdentity: string };
 }
 const same = (a: unknown, b: unknown) =>
   JSON.stringify(a) === JSON.stringify(b);
@@ -195,20 +196,41 @@ export function historyOps(
     else if (before && !after) ops.push({ op: 'clip.remove', id });
     else if (before && after && !same(before, after)) {
       // Existing wire defaults restore optional toggles without removing a locked clip.
-      if (before.locked !== undefined && after.locked === undefined)
+      if (
+        !entry.strict &&
+        before.locked !== undefined &&
+        after.locked === undefined
+      )
         after.locked = false;
-      if (before.volume !== undefined && after.volume === undefined)
+      if (
+        !entry.strict &&
+        before.volume !== undefined &&
+        after.volume === undefined
+      )
         after.volume = 1;
-      if (before.keepPitch !== undefined && after.keepPitch === undefined)
+      if (
+        !entry.strict &&
+        before.keepPitch !== undefined &&
+        after.keepPitch === undefined
+      )
         after.keepPitch = false;
       if (
+        !entry.strict &&
         before.duckUnderVoice !== undefined &&
         after.duckUnderVoice === undefined
       )
         after.duckUnderVoice = after.audioRole === 'music';
-      if (before.fadeInSec !== undefined && after.fadeInSec === undefined)
+      if (
+        !entry.strict &&
+        before.fadeInSec !== undefined &&
+        after.fadeInSec === undefined
+      )
         after.fadeInSec = 0;
-      if (before.fadeOutSec !== undefined && after.fadeOutSec === undefined)
+      if (
+        !entry.strict &&
+        before.fadeOutSec !== undefined &&
+        after.fadeOutSec === undefined
+      )
         after.fadeOutSec = 0;
       const patch: Record<string, unknown> = {};
       for (const key of Object.keys(after) as (keyof typeof after)[])

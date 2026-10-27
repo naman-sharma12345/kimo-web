@@ -3,6 +3,7 @@ import { createIndexedDBEditPersistence } from './indexeddb';
 import { idbTestPlatform } from './indexeddb-test-platform';
 import {
   validateOutbox,
+  editIdentity,
   legacyOutboxKey,
   type EditOutboxRecord,
 } from './persistence';
@@ -24,6 +25,48 @@ const ticks = async () => {
   for (let n = 0; n < 30; n++) await Promise.resolve();
 };
 describe('native IndexedDB edit persistence adapter (bounded event double)', () => {
+  it('retains strict restore guards through legacy import, transaction readback and reopen', async () => {
+    const fake = idbTestPlatform();
+    const storage = memoryStorage();
+    const record: EditOutboxRecord = {
+      ...empty,
+      groups: [
+        {
+          id: 'strict',
+          source: 'history',
+          label: 'restore',
+          status: 'unknown',
+          baseVersion: 0,
+          ops: [{ op: 'clip.remove', id: 'c' }],
+          strictGuard: {
+            ...identity,
+            version: 0,
+            projectIdentity: 'reviewed-project',
+            assetsIdentity: 'reviewed-assets',
+            opsIdentity: editIdentity([{ op: 'clip.remove', id: 'c' }]),
+          },
+        },
+      ],
+    };
+    storage.setItem(
+      legacyOutboxKey(identity),
+      JSON.stringify({ ...record, format: 1 }),
+    );
+    const adapter = createIndexedDBEditPersistence(fake.platform);
+    const binding = await adapter.open(identity, {
+      ...options(),
+      legacyStorage: storage,
+    });
+    expect(binding.record).toEqual(record);
+    await binding.save(record);
+    await binding.close();
+    const recovered = await adapter.open(identity, options());
+    expect(recovered.record?.groups[0]?.strictGuard).toEqual(
+      record.groups[0]?.strictGuard,
+    );
+    expect(recovered.record?.groups[0]?.status).toBe('unknown');
+    await recovered.close();
+  });
   it('waits for transaction complete and rejects an abort without overwriting data', async () => {
     const fake = idbTestPlatform();
     const adapter = createIndexedDBEditPersistence(fake.platform);

@@ -1489,3 +1489,575 @@ describe('poster font preparation cancellation', () => {
     r.destroy();
   });
 });
+
+// These assertions inspect mocked Application submissions and real Pixi tree
+// structure only. They do not establish GPU pixels, decoder or audible output.
+describe('one-Application comparison structure and lifetime', () => {
+  const branch = (name: 'current' | 'historical') =>
+    must(root().children.find((n) => n.label === `comparison:${name}`));
+  const composition = (name: 'current' | 'historical') =>
+    must(branch(name).children.find((n) => n.label === `composition:${name}`));
+  const mask = (name: 'current' | 'historical') =>
+    must(root().children.find((n) => n.label === `wipe:${name}`));
+  const title = () => {
+    const text = layer('same-title', 'text');
+    text.assetId = undefined;
+    text.text = resolveText(
+      { content: 'Branch title', style: 'caption' },
+      0,
+      1920,
+      1080,
+    );
+    return text;
+  };
+  const compare = (
+    current = scene([layer()]),
+    historical = scene([layer()]),
+    split = 0.5,
+  ) => ({ current, historical, split });
+
+  it('isolates overlapping clip, asset and resource keys without rewriting IDs; submits once', async () => {
+    const historicalPixels = {
+      ...pixelSource,
+      data: new Uint8Array([0, 0, 255, 255]),
+    };
+    const requests = vi.fn((request: RendererResourceRequest) => ({
+      ...lease('same-key'),
+      source: request.branch === 'historical' ? historicalPixels : pixelSource,
+    }));
+    const r = await renderer(requests);
+    const result = await r.renderComparison(compare());
+    expect(result).toMatchObject({
+      submitted: true,
+      retained: false,
+      approximations: [],
+    });
+    expect(
+      requests.mock.calls.map(([req]) => [req.branch, req.clipId, req.assetId]),
+    ).toEqual([
+      ['current', 'a', 'asset:a'],
+      ['historical', 'a', 'asset:a'],
+    ]);
+    const current = must(composition('current').children[0]);
+    const historical = must(composition('historical').children[0]);
+    expect(current.label).toBe('a');
+    expect(historical.label).toBe('a');
+    expect(current).not.toBe(historical);
+    const a = must(
+      current.children[0]?.children[0],
+    ) as import('pixi.js').Sprite;
+    const b = must(
+      historical.children[0]?.children[0],
+    ) as import('pixi.js').Sprite;
+    expect(a.texture).not.toBe(b.texture);
+    expect(a.texture.source.resource).toBe(pixelSource.data);
+    expect(b.texture.source.resource).toBe(historicalPixels.data);
+    expect(harness.apps).toHaveLength(1);
+    expect(app().render).toHaveBeenCalledOnce();
+    expect(app().stop).toHaveBeenCalledOnce();
+    r.destroy();
+  });
+
+  it.each([0, 0.5, 1])(
+    'uses complementary screen-space masks at split %s and independent full viewport fits',
+    async (split) => {
+      const r = await renderer();
+      const current = {
+        ...scene([layer()]),
+        background: [1, 0, 0, 1] as [number, number, number, number],
+      };
+      const historical = {
+        ...scene([layer()]),
+        width: 1080,
+        height: 1920,
+        background: [0, 0, 1, 0.7] as [number, number, number, number],
+      };
+      await r.renderComparison(compare(current, historical, split));
+      expect(root().scale.x).toBe(1);
+      expect(composition('current').scale.x).toBeCloseTo(2 / 3);
+      expect(composition('historical').scale.x).toBeCloseTo(720 / 1920);
+      expect(composition('historical').position.x).toBeCloseTo(
+        (1280 - (1080 * 720) / 1920) / 2,
+      );
+      for (const name of ['current', 'historical'] as const) {
+        expect(branch(name).mask).toBe(mask(name));
+        expect(branch(name).scale.x).toBe(1);
+        expect(app().renderer.background.alpha).toBe(0);
+        expect(branch(name).position.x).toBe(0);
+        const wipe = mask(name) as import('pixi.js').Graphics;
+        const shape = wipe.context.instructions[0];
+        expect(shape?.action).toBe('fill');
+        if (shape?.action !== 'fill')
+          throw new Error('expected rectangle fill');
+        const rect = shape.data.path.instructions[0];
+        expect(rect?.action).toBe('rect');
+        expect(rect?.data.slice(0, 4)).toEqual([
+          name === 'current' ? 0 : 1280 * split,
+          0,
+          name === 'current' ? 1280 * split : 1280 * (1 - split),
+          720,
+        ]);
+        const background = must(
+          branch(name).children[0],
+        ) as import('pixi.js').Graphics;
+        const fill = background.context.instructions[0];
+        if (fill?.action !== 'fill')
+          throw new Error('expected background fill');
+        expect(fill.data.style.color).toBe(
+          name === 'current' ? 0xff0000 : 0x0000ff,
+        );
+        expect(fill.data.style.alpha).toBe(name === 'current' ? 1 : 0.7);
+      }
+      expect(app().render).toHaveBeenCalledOnce();
+      r.destroy();
+    },
+  );
+
+  it('qualifies media, masks and LUTs for each branch, preserving source time and mask index', async () => {
+    const lut = {
+      data: new Uint8Array(512 * 512 * 4),
+      width: 512,
+      height: 512,
+    };
+    const getResource = vi.fn((request: RendererResourceRequest) =>
+      request.role === 'lut'
+        ? { key: 'lut', source: lut, width: 512, height: 512 }
+        : lease(request.role),
+    );
+    const r = await renderer(getResource);
+    const a = layer();
+    a.sourceTime = 7;
+    a.mask = {
+      assetId: 'mask',
+      sourceTime: 3,
+      frameIndex: 90,
+      mode: 'cutout',
+      invert: false,
+      feather: 0,
+    };
+    a.effects = [
+      {
+        id: 'same-effect',
+        kind: 'lut',
+        scope: 'all',
+        params: { assetId: 'lut' },
+      },
+    ];
+    await r.renderComparison(compare(scene([a]), scene([a])));
+    expect(
+      getResource.mock.calls.map(([req]) => [
+        req.branch,
+        req.role,
+        req.sourceTime,
+        req.frameIndex,
+      ]),
+    ).toEqual([
+      ['current', 'media', 7, undefined],
+      ['current', 'mask', 3, 90],
+      ['current', 'lut', 7, undefined],
+      ['historical', 'media', 7, undefined],
+      ['historical', 'mask', 3, 90],
+      ['historical', 'lut', 7, undefined],
+    ]);
+    const aContent = must(composition('current').children[0]?.children[0]);
+    const bContent = must(composition('historical').children[0]?.children[0]);
+    expect(aContent.filters).toHaveLength(2);
+    expect(bContent.filters).toHaveLength(2);
+    expect(aContent.filters?.[0]).not.toBe(bContent.filters?.[0]);
+    r.destroy();
+  });
+
+  it.each(['current', 'historical'] as const)(
+    'fails closed on first comparison with %s missing, then retries',
+    async (missing) => {
+      let ready = false;
+      const releases: ReturnType<typeof vi.fn>[] = [];
+      const r = await renderer((req) => {
+        if (!ready && req.branch === missing) return undefined;
+        const release = vi.fn();
+        releases.push(release);
+        return lease('same-key', release);
+      });
+      const result = await r.renderComparison(compare());
+      expect(result).toMatchObject({ submitted: false, retained: false });
+      expect(
+        result.approximations.some((a) =>
+          a.reason.includes(`${missing}: media resource pending`),
+        ),
+      ).toBe(true);
+      expect(app().render).not.toHaveBeenCalled();
+      expect(root().children).toHaveLength(0);
+      expect(releases.every((release) => release.mock.calls.length === 1)).toBe(
+        true,
+      );
+      ready = true;
+      expect((await r.renderComparison(compare())).submitted).toBe(true);
+      r.destroy();
+      expect(releases.every((release) => release.mock.calls.length === 1)).toBe(
+        true,
+      );
+    },
+  );
+
+  it('retains a previous single framebuffer and tree until both branches are ready', async () => {
+    let missing = true;
+    const r = await renderer((req) =>
+      missing && req.branch === 'historical' ? undefined : lease(),
+    );
+    await r.render(scene([layer('live')]));
+    const live = node();
+    const result = await r.renderComparison(compare());
+    expect(result).toMatchObject({ submitted: false, retained: true });
+    expect(root().children).toEqual([live]);
+    expect(live.destroyed).toBe(false);
+    expect(app().render).toHaveBeenCalledOnce();
+    missing = false;
+    await r.renderComparison(compare());
+    expect(live.destroyed).toBe(true);
+    expect(app().render).toHaveBeenCalledTimes(2);
+    r.destroy();
+  });
+
+  it('does not resubmit retained mutable videos or change masks when one branch is pending', async () => {
+    let ready = true;
+    const videos = {
+      current: document.createElement('video'),
+      historical: document.createElement('video'),
+    };
+    for (const video of Object.values(videos)) {
+      video.width = 16;
+      video.height = 9;
+      video.src = 'https://media.invalid/pooled.mp4';
+    }
+    const r = await renderer((req) => {
+      if (!ready && req.branch === 'historical') return undefined;
+      return {
+        key: 'pooled-video',
+        source: videos[req.branch ?? 'current'],
+        width: 16,
+        height: 9,
+      };
+    });
+    await r.renderComparison(
+      compare(scene([layer('a', 'video')]), scene([layer('a', 'video')])),
+    );
+    const current = must(
+      composition('current').children[0]?.children[0]?.children[0],
+    ) as import('pixi.js').Sprite;
+    const update = vi.spyOn(current.texture.source, 'update');
+    const rect = (mask('current') as import('pixi.js').Graphics).context
+      .instructions[0];
+    ready = false;
+    const result = await r.renderComparison(
+      compare(scene([layer('a', 'video')]), scene([layer('a', 'video')]), 0.9),
+    );
+    expect(result).toMatchObject({ submitted: false, retained: true });
+    expect(app().render).toHaveBeenCalledOnce();
+    expect(update).not.toHaveBeenCalled();
+    expect(
+      (mask('current') as import('pixi.js').Graphics).context.instructions[0],
+    ).toBe(rect);
+    r.destroy();
+    expect(videos.current.src).toBe('https://media.invalid/pooled.mp4');
+    expect(videos.historical.src).toBe('https://media.invalid/pooled.mp4');
+  });
+
+  it('waits for independent branch font loads and never submits a first-frame fallback', async () => {
+    const loads: ((ready: boolean) => void)[] = [];
+    const loadFont = vi.fn(
+      () => new Promise<boolean>((resolve) => loads.push(resolve)),
+    );
+    const r = await renderer(() => lease(), loadFont);
+    const rendering = r.renderComparison(
+      compare(scene([title()]), scene([title()])),
+    );
+    await vi.waitFor(() => expect(loads).toHaveLength(2));
+    loads[0]?.(true);
+    await Promise.resolve();
+    expect(app().render).not.toHaveBeenCalled();
+    loads[1]?.(false);
+    const result = await rendering;
+    expect(result).toMatchObject({ submitted: false, retained: false });
+    expect(
+      result.approximations.some((a) =>
+        a.reason.includes('historical: canvas font unavailable'),
+      ),
+    ).toBe(true);
+    expect(harness.texts).toHaveLength(0);
+    const retry = r.renderComparison(
+      compare(scene([title()]), scene([title()])),
+    );
+    await vi.waitFor(() => expect(loads).toHaveLength(3));
+    loads[2]?.(true);
+    expect((await retry).submitted).toBe(true);
+    expect(harness.texts).toHaveLength(2);
+    r.destroy();
+  });
+
+  it.each(['cancel', 'exit', 'dispose'] as const)(
+    'releases both pending branches promptly on %s without a late submission',
+    async (action) => {
+      const releases: ReturnType<typeof vi.fn>[] = [];
+      const loads: ((ready: boolean) => void)[] = [];
+      const r = await renderer(
+        () => {
+          const release = vi.fn();
+          releases.push(release);
+          return lease('same', release);
+        },
+        () => new Promise<boolean>((resolve) => loads.push(resolve)),
+      );
+      const rendering = r.renderComparison(
+        compare(scene([layer(), title()]), scene([layer(), title()])),
+      );
+      await vi.waitFor(() => expect(loads).toHaveLength(2));
+      if (action === 'dispose') r.destroy();
+      else if (action === 'exit') await r.render(scene([]));
+      else r.cancelPending();
+      expect((await rendering).submitted).toBe(false);
+      expect(releases.every((release) => release.mock.calls.length === 1)).toBe(
+        true,
+      );
+      loads.forEach((resolve) => resolve(true));
+      await Promise.resolve();
+      expect(app().render).toHaveBeenCalledTimes(action === 'exit' ? 1 : 0);
+      r.destroy();
+      expect(releases.every((release) => release.mock.calls.length === 1)).toBe(
+        true,
+      );
+    },
+  );
+
+  it('releases branch textures, masks, filters and fonts once on exit; live capture still uses undefined branch', async () => {
+    const releases: ReturnType<typeof vi.fn>[] = [];
+    const getResource = vi.fn((request: RendererResourceRequest) => {
+      void request;
+      const release = vi.fn();
+      releases.push(release);
+      return lease('shared', release);
+    });
+    const loadFont = vi.fn(async () => true);
+    const r = await renderer(getResource, loadFont);
+    const a = layer();
+    a.effects = [
+      { id: 'grade', kind: 'grade', params: { exposure: 1 }, scope: 'all' },
+    ];
+    await r.renderComparison(compare(scene([a, title()]), scene([a, title()])));
+    const wrappers = [branch('current'), branch('historical')];
+    const masks = [mask('current'), mask('historical')];
+    const destroys = wrappers.map((wrapper) => vi.spyOn(wrapper, 'destroy'));
+    const maskDestroys = masks.map((wipe) => vi.spyOn(wipe, 'destroy'));
+    const filter = must(
+      composition('current').children[0]?.children[0]?.filters?.[0],
+    );
+    const filterDestroy = vi.spyOn(filter, 'destroy');
+    const capture = await r.render(scene([layer('live')]), { capture: true });
+    expect(capture.frame?.blob.type).toBe('image/png');
+    expect(getResource.mock.calls.at(-1)?.[0]).toMatchObject({
+      branch: undefined,
+    });
+    expect(root().children.map((child) => child.label)).toEqual(['live']);
+    expect(filterDestroy).toHaveBeenCalledOnce();
+    expect(destroys.every((destroy) => destroy.mock.calls.length === 1)).toBe(
+      true,
+    );
+    expect(
+      maskDestroys.every((destroy) => destroy.mock.calls.length === 1),
+    ).toBe(true);
+    expect(
+      releases.slice(0, 2).every((release) => release.mock.calls.length === 1),
+    ).toBe(true);
+    await r.renderComparison(compare(scene([title()]), scene([title()])));
+    expect(loadFont).toHaveBeenCalledTimes(4);
+    r.destroy();
+    r.destroy();
+    expect(filterDestroy).toHaveBeenCalledOnce();
+    expect(destroys.every((destroy) => destroy.mock.calls.length === 1)).toBe(
+      true,
+    );
+    expect(
+      maskDestroys.every((destroy) => destroy.mock.calls.length === 1),
+    ).toBe(true);
+    expect(releases.every((release) => release.mock.calls.length === 1)).toBe(
+      true,
+    );
+  });
+
+  it('rejects comparison capture and invalid splits without exporting or submitting a wipe', async () => {
+    const r = await renderer();
+    await expect(
+      r.renderComparison(compare(), { capture: true }),
+    ).rejects.toThrow('during comparison');
+    for (const split of [-1, 1.1, NaN, Infinity])
+      await expect(
+        r.renderComparison(compare(undefined, undefined, split)),
+      ).rejects.toThrow('invalid comparison split');
+    expect(app().renderer.extract.canvas).not.toHaveBeenCalled();
+    expect(app().render).not.toHaveBeenCalled();
+    r.destroy();
+  });
+});
+
+describe('comparison transition and failure isolation (not GPU acceptance)', () => {
+  const composition = (branch: 'current' | 'historical') => {
+    const wrapper = must(
+      root().children.find((n) => n.label === `comparison:${branch}`),
+    );
+    return must(
+      wrapper.children.find((n) => n.label === `composition:${branch}`),
+    );
+  };
+  function paired(blackWeight: number): SceneGraph {
+    return {
+      ...scene([layer('out'), layer('in')]),
+      transitionPairs: [
+        {
+          id: 'same-pair',
+          trackId: 'v',
+          kind: blackWeight ? 'dip' : 'crossfade',
+          outgoingClipId: 'out',
+          incomingClipId: 'in',
+          compositeAtClipId: 'in',
+          boundary: 1,
+          start: 0.5,
+          end: 1.5,
+          progress: 0.5,
+          durationSec: 1,
+          direction: 'left',
+          composite: 'premultiplied_mix',
+          outgoingWeight: blackWeight ? 0 : 0.5,
+          incomingWeight: blackWeight ? 0 : 0.5,
+          blackWeight,
+        },
+      ],
+    };
+  }
+  it('keeps same-ID transition groups, black planes, member filters and ordering branch-local through reconciliation', async () => {
+    const r = await renderer((req) => lease(req.clipId));
+    const current = paired(0),
+      historical = { ...paired(1), width: 1080, height: 1920 };
+    await r.renderComparison({ current, historical, split: 0.5 });
+    const a = must(composition('current').children[0]);
+    const b = must(composition('historical').children[0]);
+    expect(a.label).toBe('transition:same-pair');
+    expect(b.label).toBe(a.label);
+    expect(a).not.toBe(b);
+    expect(a.children.map((child) => child.label)).toEqual([
+      'Graphics',
+      'out',
+      'in',
+    ]);
+    expect(a.children[0]?.alpha).toBe(0);
+    expect(b.children[0]?.alpha).toBe(1);
+    expect(a.children[1]?.alpha).toBe(0.5);
+    expect(b.children[1]?.alpha).toBe(0);
+    expect(a.filters?.[0]).not.toBe(b.filters?.[0]);
+    expect(a.children[1]?.filters?.[0]).not.toBe(b.children[1]?.filters?.[0]);
+    const filterDestroy = vi.spyOn(must(a.filters?.[0]), 'destroy');
+    const blackDestroy = vi.spyOn(must(a.children[0]), 'destroy');
+    const pairDestroy = vi.spyOn(a, 'destroy');
+    await r.renderComparison({
+      current: scene([layer('in'), layer('out')]),
+      historical,
+      split: 0.75,
+    });
+    expect(composition('current').children.map((child) => child.label)).toEqual(
+      ['in', 'out'],
+    );
+    expect(composition('historical').children[0]).toBe(b);
+    expect(filterDestroy).toHaveBeenCalledOnce();
+    expect(blackDestroy).toHaveBeenCalledOnce();
+    expect(pairDestroy).toHaveBeenCalledOnce();
+    expect(app().render).toHaveBeenCalledTimes(2);
+    r.destroy();
+    expect(filterDestroy).toHaveBeenCalledOnce();
+    expect(blackDestroy).toHaveBeenCalledOnce();
+    expect(pairDestroy).toHaveBeenCalledOnce();
+  });
+
+  it.each(['throw', 'dimensions', 'buffer', 'lut', 'font-rejection'] as const)(
+    'fails closed initially for %s and releases prepared leases exactly once',
+    async (failure) => {
+      const releases: ReturnType<typeof vi.fn>[] = [];
+      const r = await renderer(
+        (req) => {
+          if (failure === 'throw' && req.branch === 'historical')
+            throw new Error('unavailable');
+          const release = vi.fn();
+          releases.push(release);
+          const resource = lease(req.role, release);
+          if (req.branch !== 'historical') return resource;
+          if (failure === 'dimensions') return { ...resource, width: 0 };
+          if (failure === 'buffer') return { ...resource, width: 2 };
+          return resource; // LUT 1x1 is intentionally invalid on either side.
+        },
+        async () => {
+          throw new Error('font unavailable');
+        },
+      );
+      const a = layer();
+      if (failure === 'lut')
+        a.effects = [
+          { id: 'lut', kind: 'lut', scope: 'all', params: { assetId: 'lut' } },
+        ];
+      if (failure === 'font-rejection') {
+        a.kind = 'text';
+        a.assetId = undefined;
+        a.text = resolveText(
+          { content: 'text', style: 'caption' },
+          0,
+          1920,
+          1080,
+        );
+      }
+      const result = await r.renderComparison({
+        current: scene([a]),
+        historical: scene([a]),
+        split: 0.5,
+      });
+      expect(result).toMatchObject({ submitted: false, retained: false });
+      expect(result.approximations.length).toBeGreaterThan(0);
+      expect(app().render).not.toHaveBeenCalled();
+      r.destroy();
+      expect(releases.every((release) => release.mock.calls.length === 1)).toBe(
+        true,
+      );
+    },
+  );
+
+  it('preserves branch-qualified timestamp degradation instead of claiming a fresh frame', async () => {
+    const r = await renderer((req) => ({
+      ...lease(),
+      approximation: `${req.branch} source timestamp drift; held frame`,
+    }));
+    const result = await r.renderComparison({
+      current: scene([layer()]),
+      historical: scene([layer()]),
+      split: 0.5,
+    });
+    expect(result.approximations.map((a) => a.reason)).toEqual([
+      'current: current source timestamp drift; held frame',
+      'historical: historical source timestamp drift; held frame',
+    ]);
+    expect(result.submitted).toBe(true); // Explicit degradation, never an unqualified fresh claim.
+    r.destroy();
+  });
+
+  it('refits each complete composition after resize without a new app or changing half-width scale', async () => {
+    const r = await renderer();
+    const current = scene([layer()]),
+      historical = { ...scene([layer()]), width: 1080, height: 1920 };
+    await r.renderComparison({ current, historical, split: 0.1 });
+    const currentNode = composition('current').children[0];
+    const historicalNode = composition('historical').children[0];
+    r.resize(720, 1280);
+    await r.renderComparison({ current, historical, split: 0.9 });
+    expect(composition('current').scale.x).toBeCloseTo(720 / 1920);
+    expect(composition('historical').scale.x).toBeCloseTo(2 / 3);
+    expect(composition('current').children[0]).toBe(currentNode);
+    expect(composition('historical').children[0]).toBe(historicalNode);
+    expect(harness.apps).toHaveLength(1);
+    expect(app().render).toHaveBeenCalledTimes(2);
+    r.destroy();
+  });
+});

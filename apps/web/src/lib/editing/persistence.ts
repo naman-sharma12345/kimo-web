@@ -2,6 +2,27 @@ import { z } from 'zod';
 import { opSchema, projectSchema } from '@kimo/client';
 
 const version = z.number().int().nonnegative().safe();
+export const strictEditGuardSchema = z
+  .object({
+    sessionId: z.string().min(1),
+    projectId: z.string().min(1),
+    version,
+    projectIdentity: z.string().min(1),
+    assetsIdentity: z.string().min(1),
+    opsIdentity: z.string().min(1),
+  })
+  .strict();
+/** Canonical JSON content identity, not a cryptographic authentication claim. */
+export function editIdentity(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(editIdentity).join(',')}]`;
+  if (value !== null && typeof value === 'object')
+    return `{${Object.entries(value)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${JSON.stringify(k)}:${editIdentity(v)}`)
+      .join(',')}}`;
+  return JSON.stringify(value) ?? 'null';
+}
 const groups = z.array(
   z.object({
     id: z.string().min(1),
@@ -19,6 +40,7 @@ const groups = z.array(
     status: z.enum(['unsent', 'failed', 'unknown']),
     baseVersion: version.optional(),
     acceptedVersion: version.optional(),
+    strictGuard: strictEditGuardSchema.optional(),
     intentBaseline: projectSchema.optional(),
     intentOps: z.array(opSchema).optional(),
   }),
@@ -95,5 +117,18 @@ export function validateOutbox(
     )
   )
     throw new Error('Stored intent must include both baseline and operations');
+  for (const group of record.groups) {
+    const guard = group.strictGuard;
+    if (
+      guard &&
+      (guard.sessionId !== identity.sessionId ||
+        guard.projectId !== identity.projectId ||
+        guard.opsIdentity !== editIdentity(group.ops) ||
+        group.intentBaseline)
+    )
+      throw new Error(
+        'Stored strict guard does not match its payload or session',
+      );
+  }
   return record;
 }

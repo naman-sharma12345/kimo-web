@@ -9,6 +9,8 @@ import type {
   SceneGraph,
 } from './types';
 import type {
+  ComparisonFrame,
+  RendererBranch,
   PreparedRendererResource,
   RendererInit,
   RendererOptions,
@@ -110,6 +112,25 @@ interface PairNode {
   black: PIXI.Graphics;
   size: string;
 }
+/** Original scene IDs and resource keys are scoped here, never flattened across cuts. */
+interface BranchState {
+  root: PIXI.Container;
+  nodes: Map<string, LayerNode>;
+  pairs: Map<string, PairNode>;
+  textures: Map<string, CachedTexture>;
+  fonts: Map<string, Promise<boolean>>;
+  wrapper?: PIXI.Container;
+  background?: PIXI.Graphics;
+  mask?: PIXI.Graphics;
+}
+interface PreparedScene {
+  scene: SceneGraph;
+  resources: Map<string, Map<string, PreparedRendererResource>>;
+  fonts: boolean[];
+  pending: boolean;
+  approximations: Approximation[];
+  warn: (id: string, reason: string) => void;
+}
 /** Controller-selected output size helper. No device reads or adaptive clock here. */
 export function fitViewport(
   projectWidth: number,
@@ -154,16 +175,14 @@ const effectModes: Readonly<Record<string, FilterMode>> = {
   gaussian_blur: 'blur',
   whip: 'whip',
 };
-/** Retained scene graph. Only render() submits frames; there is no internal scheduler. */
+/** Retained scene graph. Explicit render calls submit frames; no internal scheduler. */
 export class PixiRenderer implements SceneRenderer {
   private pixi?: Pixi;
   private FilterClass?: typeof LiveFilter;
   private app?: PIXI.Application;
   private root?: PIXI.Container;
-  private readonly nodes = new Map<string, LayerNode>();
-  private readonly pairs = new Map<string, PairNode>();
-  private readonly textures = new Map<string, CachedTexture>();
-  private readonly fonts = new Map<string, Promise<boolean>>();
+  private live?: BranchState;
+  private comparison?: Record<RendererBranch, BranchState>;
   private revision = 0;
   private readonly pendingPreparations = new Map<number, () => void>();
   private disposed = false;
@@ -251,8 +270,11 @@ export class PixiRenderer implements SceneRenderer {
     this.viewport = { width, height };
     this.app.renderer.resize(width, height, resolution);
   }
-  private acquire(resource: PreparedRendererResource): CachedTexture {
-    const prior = this.textures.get(resource.key);
+  private acquire(
+    state: BranchState,
+    resource: PreparedRendererResource,
+  ): CachedTexture {
+    const prior = state.textures.get(resource.key);
     if (prior) {
       const video =
         typeof HTMLVideoElement !== 'undefined' &&
@@ -290,19 +312,19 @@ export class PixiRenderer implements SceneRenderer {
       lease: resource,
       revision: resource.revision,
     };
-    this.textures.set(resource.key, entry);
+    state.textures.set(resource.key, entry);
     return entry;
   }
-  private release(key: string): void {
-    const entry = this.textures.get(key);
+  private release(state: BranchState, key: string): void {
+    const entry = state.textures.get(key);
     if (!entry) return;
     if (--entry.refs > 0) return;
     entry.texture.destroy(true);
     entry.lease.release?.();
-    this.textures.delete(key);
+    state.textures.delete(key);
   }
-  private destroyNode(id: string): void {
-    const node = this.nodes.get(id);
+  private destroyNode(state: BranchState, id: string): void {
+    const node = state.nodes.get(id);
     if (!node) return;
     node.content.filters = [];
     node.container.filters = [];
@@ -313,10 +335,10 @@ export class PixiRenderer implements SceneRenderer {
       texture: false,
       textureSource: false,
     });
-    node.resources.forEach((key) => this.release(key));
-    this.nodes.delete(id);
+    node.resources.forEach((key) => this.release(state, key));
+    state.nodes.delete(id);
   }
-  private createNode(layer: ResolvedLayer): LayerNode {
+  private createNode(state: BranchState, layer: ResolvedLayer): LayerNode {
     const p = required(this.pixi);
     const container = new p.Container({
         label: layer.clipId,
@@ -325,7 +347,7 @@ export class PixiRenderer implements SceneRenderer {
       content = new p.Container(),
       crop = new p.Graphics();
     container.addChild(content, crop);
-    required(this.root).addChild(container);
+    state.root.addChild(container);
     const node: LayerNode = {
       kind: layer.kind,
       container,
@@ -334,13 +356,16 @@ export class PixiRenderer implements SceneRenderer {
       resources: new Set(),
       filters: new Map(),
     };
-    this.nodes.set(layer.clipId, node);
+    state.nodes.set(layer.clipId, node);
     return node;
   }
-  private async fontReady(text: ResolvedText): Promise<boolean> {
+  private async fontReady(
+    state: BranchState,
+    text: ResolvedText,
+  ): Promise<boolean> {
     const load = (css: string, content: string) => {
       const key = `${css}:${content}`;
-      let ready = this.fonts.get(key);
+      let ready = state.fonts.get(key);
       if (!ready) {
         ready = Promise.resolve()
           .then(
@@ -359,16 +384,16 @@ export class PixiRenderer implements SceneRenderer {
           )
           .catch(() => false)
           .then((loaded) => {
-            if (!loaded && this.fonts.get(key) === ready)
-              this.fonts.delete(key);
+            if (!loaded && state.fonts.get(key) === ready)
+              state.fonts.delete(key);
             if (loaded) this.pixi?.CanvasTextMetrics.clearMetrics();
             return loaded;
           });
-        if (this.fonts.size >= 128) {
-          const oldest = this.fonts.keys().next().value;
-          if (oldest !== undefined) this.fonts.delete(oldest);
+        if (state.fonts.size >= 128) {
+          const oldest = state.fonts.keys().next().value;
+          if (oldest !== undefined) state.fonts.delete(oldest);
         }
-        this.fonts.set(key, ready);
+        state.fonts.set(key, ready);
       }
       return ready;
     };
@@ -393,13 +418,72 @@ export class PixiRenderer implements SceneRenderer {
     this.pendingPreparations.forEach((cancel) => cancel());
     this.pendingPreparations.clear();
   }
+  private createState(root: PIXI.Container): BranchState {
+    return {
+      root,
+      nodes: new Map(),
+      pairs: new Map(),
+      textures: new Map(),
+      fonts: new Map(),
+    };
+  }
+  private destroyState(state: BranchState): void {
+    for (const id of state.pairs.keys()) this.destroyPair(state, id);
+    for (const id of state.nodes.keys()) this.destroyNode(state, id);
+    state.textures.forEach((entry) => {
+      entry.texture.destroy(true);
+      entry.lease.release?.();
+    });
+    state.textures.clear();
+    state.fonts.clear();
+    if (state.wrapper) {
+      state.wrapper.mask = null;
+      state.wrapper.destroy({
+        children: true,
+        texture: false,
+        textureSource: false,
+      });
+      state.mask?.destroy();
+    }
+  }
+  private exitComparison(): void {
+    if (!this.comparison) return;
+    this.destroyState(this.comparison.current);
+    this.destroyState(this.comparison.historical);
+    this.comparison = undefined;
+  }
+  private createComparisonBranch(branch: RendererBranch): BranchState {
+    const p = required(this.pixi);
+    const wrapper = new p.Container({ label: `comparison:${branch}` }),
+      root = new p.Container({ label: `composition:${branch}` }),
+      background = new p.Graphics({ label: `background:${branch}` }),
+      mask = new p.Graphics({ label: `wipe:${branch}` });
+    wrapper.addChild(background, root);
+    wrapper.mask = mask;
+    return { ...this.createState(root), wrapper, background, mask };
+  }
   async render(
     scene: SceneGraph,
     options: RenderOptions = {},
   ): Promise<RenderResult> {
-    if (options.signal?.aborted) throw new Error('poster capture aborted');
-    if (!this.app || !this.root || this.disposed)
-      throw new Error('renderer not initialized');
+    return this.renderFrame(scene, options);
+  }
+  async renderComparison(
+    frame: ComparisonFrame,
+    options: RenderOptions = {},
+  ): Promise<RenderResult> {
+    if (options.capture)
+      throw new Error('poster unavailable during comparison');
+    if (!Number.isFinite(frame.split) || frame.split < 0 || frame.split > 1)
+      throw new Error('invalid comparison split');
+    return this.renderFrame(frame.current, options, frame);
+  }
+  private async prepareScene(
+    state: BranchState,
+    scene: SceneGraph,
+    branch: RendererBranch | undefined,
+    register: (release: () => void) => void,
+  ): Promise<PreparedScene> {
     if (scene.excludedTextPairs?.length) {
       // Preserve the pair's weights/black plane/order with transparent text, not a missing member.
       const layers = [...scene.layers];
@@ -414,9 +498,6 @@ export class PixiRenderer implements SceneRenderer {
         });
       scene = { ...scene, layers };
     }
-    const revision = ++this.revision;
-    this.pendingPreparations.forEach((cancel) => cancel());
-    this.pendingPreparations.clear();
     const approximations: Approximation[] = [...scene.approximations];
     const seen = new Set(
       approximations.map((a) => JSON.stringify([a.clipId, a.reason])),
@@ -443,6 +524,7 @@ export class PixiRenderer implements SceneRenderer {
         let resource: PreparedRendererResource | undefined;
         try {
           resource = this.options.getResource?.({
+            branch,
             clipId: layer.clipId,
             assetId,
             sourceTime:
@@ -475,8 +557,9 @@ export class PixiRenderer implements SceneRenderer {
           (resource.width !== 512 || resource.height !== 512)
         ) {
           resource.release?.();
+          resource = undefined;
           warn(layer.clipId, 'LUT must be a 512x512 atlas; base preview');
-          return;
+          if (!branch) return;
         }
 
         if (
@@ -493,7 +576,7 @@ export class PixiRenderer implements SceneRenderer {
         }
         if (resource) {
           const old =
-            this.textures.get(resource.key)?.lease.source ??
+            state.textures.get(resource.key)?.lease.source ??
             identities.get(resource.key);
           const same =
             !old ||
@@ -537,7 +620,10 @@ export class PixiRenderer implements SceneRenderer {
         ) {
           const id = effect.params.assetId ?? effect.params.lutAssetId;
           if (typeof id === 'string') request('lut', id, `lut:${effect.id}`);
-          else warn(layer.clipId, 'LUT asset ID absent');
+          else {
+            if (branch) pending = true;
+            warn(layer.clipId, 'LUT asset ID absent');
+          }
         }
     }
     let preparedReleased = false;
@@ -545,106 +631,257 @@ export class PixiRenderer implements SceneRenderer {
       if (preparedReleased) return;
       preparedReleased = true;
       prepared.forEach((resources) => resources.forEach((r) => r.release?.()));
+    };
+    register(releasePrepared);
+    if (pending && this.hasFrame)
+      return {
+        scene,
+        resources: prepared,
+        fonts: [],
+        pending,
+        approximations,
+        warn,
+      };
+    const fontWork = Promise.all(
+      scene.layers.map(
+        async (l) => !l.text || (await this.fontReady(state, l.text)),
+      ),
+    );
+    const fontResults = await fontWork;
+    scene.layers.forEach((l, i) => {
+      if (!fontResults[i])
+        warn(
+          l.clipId,
+          branch
+            ? 'canvas font unavailable; comparison frame withheld'
+            : 'canvas font unavailable; system fallback',
+        );
+    });
+    return {
+      scene,
+      resources: prepared,
+      fonts: fontResults,
+      pending,
+      approximations,
+      warn,
+    };
+  }
+  private commitScene(state: BranchState, preparation: PreparedScene): void {
+    const {
+      scene,
+      resources: prepared,
+      fonts: fontResults,
+      warn,
+    } = preparation;
+    state.root.scale.set(
+      Math.min(
+        this.viewport.width / scene.width,
+        this.viewport.height / scene.height,
+      ),
+    );
+    state.root.position.set(
+      (this.viewport.width - scene.width * state.root.scale.x) / 2,
+      (this.viewport.height - scene.height * state.root.scale.y) / 2,
+    );
+    const visible = new Set(scene.layers.map((l) => l.clipId));
+    for (const id of state.nodes.keys())
+      if (!visible.has(id)) this.destroyNode(state, id);
+    scene.layers.forEach((layer, layerIndex) => {
+      let node = state.nodes.get(layer.clipId);
+      if (node && node.kind !== layer.kind) {
+        this.destroyNode(state, layer.clipId);
+        node = undefined;
+      }
+      node ??= this.createNode(state, layer);
+      if (layer.text) {
+        if (node.fontReady === false && fontResults[layerIndex])
+          node.contentSignature = undefined;
+        node.fontReady = fontResults[layerIndex];
+      }
+
+      const resources = required(prepared.get(layer.clipId));
+      const next = new Set<string>();
+      const slots = new Map<string, PIXI.Texture>();
+      for (const [slot, resource] of resources) {
+        const entry = this.acquire(state, resource);
+        resources.delete(slot);
+        slots.set(slot, entry.texture);
+        if (!next.has(resource.key)) {
+          next.add(resource.key);
+          if (!node.resources.has(resource.key)) entry.refs++;
+        }
+      }
+      const old = node.resources;
+      node.resources = next;
+      this.updateNode(state, node, layer, scene, slots, warn);
+      // Release only after sprite/filter references point at the newly prepared textures.
+      old.forEach((key) => {
+        if (!next.has(key)) this.release(state, key);
+      });
+    });
+    this.compositePairs(state, scene, warn);
+  }
+  private async renderFrame(
+    scene: SceneGraph,
+    options: RenderOptions,
+    comparison?: ComparisonFrame,
+  ): Promise<RenderResult> {
+    if (options.signal?.aborted) throw new Error('poster capture aborted');
+    if (!this.app || !this.root || this.disposed)
+      throw new Error('renderer not initialized');
+    this.cancelPending();
+    const revision = this.revision;
+    // States may be prepared while detached. Do not replace the last display tree
+    // until both branches have all resources and fonts, including the first frame.
+    if (comparison)
+      this.comparison ??= {
+        current: this.createComparisonBranch('current'),
+        historical: this.createComparisonBranch('historical'),
+      };
+    else this.live ??= this.createState(this.root);
+    const releases: (() => void)[] = [];
+    let released = false;
+    const releasePrepared = () => {
+      if (released) return;
+      released = true;
+      releases.forEach((release) => release());
       this.pendingPreparations.delete(revision);
     };
     this.pendingPreparations.set(revision, releasePrepared);
-    // Do not mutate the display tree or last-good textures while any resource is pending.
-    if (pending && this.hasFrame) {
-      releasePrepared();
-      return { submitted: false, retained: true, approximations };
-    }
-    const fontWork = Promise.all(
-      scene.layers.map(async (l) => !l.text || (await this.fontReady(l.text))),
-    );
-    let fontResults: boolean[];
-    if (options.capture) {
-      let cancelFonts = () => {};
-      const cancelled = new Promise<never>((_resolve, reject) => {
-        cancelFonts = () => {
+    const register = (release: () => void) => {
+      if (released) release();
+      else releases.push(release);
+    };
+    try {
+      let cancelPreparation = () => {};
+      const preparationCancelled = new Promise<undefined>((resolve) => {
+        cancelPreparation = () => {
           releasePrepared();
-          reject(
-            new Error('poster capture invalidated during font preparation'),
-          );
+          resolve(undefined);
         };
       });
-      this.pendingPreparations.set(revision, cancelFonts);
-      options.signal?.addEventListener('abort', cancelFonts, { once: true });
-      if (options.signal?.aborted) cancelFonts();
-      try {
-        fontResults = await Promise.race([fontWork, cancelled]);
-      } finally {
-        options.signal?.removeEventListener('abort', cancelFonts);
-      }
-      if (!preparedReleased)
-        this.pendingPreparations.set(revision, releasePrepared);
-    } else fontResults = await fontWork;
-    if (
-      this.disposed ||
-      revision !== this.revision ||
-      options.signal?.aborted
-    ) {
-      releasePrepared();
-      return { submitted: false, retained: this.hasFrame, approximations };
-    }
-    scene.layers.forEach((l, i) => {
-      if (!fontResults[i])
-        warn(l.clipId, 'canvas font unavailable; system fallback');
-    });
-    if (options.capture && (pending || fontResults.some((ready) => !ready))) {
-      releasePrepared();
-      throw new Error('poster unavailable: resources or fonts not ready');
-    }
-    try {
-      this.root.scale.set(
-        Math.min(
-          this.viewport.width / scene.width,
-          this.viewport.height / scene.height,
-        ),
-      );
-      this.root.position.set(
-        (this.viewport.width - scene.width * this.root.scale.x) / 2,
-        (this.viewport.height - scene.height * this.root.scale.y) / 2,
-      );
-      const visible = new Set(scene.layers.map((l) => l.clipId));
-      for (const id of this.nodes.keys())
-        if (!visible.has(id)) this.destroyNode(id);
-      scene.layers.forEach((layer, layerIndex) => {
-        let node = this.nodes.get(layer.clipId);
-        if (node && node.kind !== layer.kind) {
-          this.destroyNode(layer.clipId);
-          node = undefined;
-        }
-        node ??= this.createNode(layer);
-        if (layer.text) {
-          if (node.fontReady === false && fontResults[layerIndex])
-            node.contentSignature = undefined;
-          node.fontReady = fontResults[layerIndex];
-        }
-
-        const resources = required(prepared.get(layer.clipId));
-        const next = new Set<string>();
-        const slots = new Map<string, PIXI.Texture>();
-        for (const [slot, resource] of resources) {
-          const entry = this.acquire(resource);
-          resources.delete(slot);
-          slots.set(slot, entry.texture);
-          if (!next.has(resource.key)) {
-            next.add(resource.key);
-            if (!node.resources.has(resource.key)) entry.refs++;
-          }
-        }
-        const old = node.resources;
-        node.resources = next;
-        this.updateNode(node, layer, scene, slots, warn);
-        // Release only after sprite/filter references point at the newly prepared textures.
-        old.forEach((key) => {
-          if (!next.has(key)) this.release(key);
-        });
+      this.pendingPreparations.set(revision, cancelPreparation);
+      options.signal?.addEventListener('abort', cancelPreparation, {
+        once: true,
       });
-      this.compositePairs(scene, warn);
-      const [r, g, b, alpha] = scene.background ?? [0, 0, 0, 1];
-      this.app.renderer.background.color = [r, g, b];
-      this.app.renderer.background.alpha = alpha;
+      let preparations: PreparedScene[] | undefined;
+      try {
+        const work = comparison
+          ? Promise.all([
+              this.prepareScene(
+                required(this.comparison).current,
+                comparison.current,
+                'current',
+                register,
+              ),
+              this.prepareScene(
+                required(this.comparison).historical,
+                comparison.historical,
+                'historical',
+                register,
+              ),
+            ])
+          : Promise.all([
+              this.prepareScene(
+                required(this.live),
+                scene,
+                undefined,
+                register,
+              ),
+            ]);
+        preparations = await Promise.race([work, preparationCancelled]);
+      } finally {
+        options.signal?.removeEventListener('abort', cancelPreparation);
+      }
+      if (!preparations) {
+        if (options.capture)
+          throw new Error('poster capture invalidated during font preparation');
+        return {
+          submitted: false,
+          retained: this.hasFrame,
+          approximations: comparison
+            ? [
+                {
+                  clipId: '',
+                  reason:
+                    'comparison preparation invalidated; no new frame submitted',
+                },
+              ]
+            : [],
+        };
+      }
+      const collectApproximations = () =>
+        preparations.flatMap((p, index) =>
+          comparison
+            ? p.approximations.map((a) => ({
+                ...a,
+                reason: `${index === 0 ? 'current' : 'historical'}: ${a.reason}`,
+              }))
+            : p.approximations,
+        );
+      let approximations = collectApproximations();
+      if (
+        this.disposed ||
+        revision !== this.revision ||
+        options.signal?.aborted
+      ) {
+        if (options.capture)
+          throw new Error('poster capture invalidated during font preparation');
+        return { submitted: false, retained: this.hasFrame, approximations };
+      }
+      const pending = preparations.some((p) => p.pending);
+      const fontsMissing = preparations.some((p) =>
+        p.fonts.some((ready) => !ready),
+      );
+      if (options.capture && (pending || fontsMissing))
+        throw new Error('poster unavailable: resources or fonts not ready');
+      if (
+        (comparison && (pending || fontsMissing)) ||
+        (pending && this.hasFrame)
+      )
+        return { submitted: false, retained: this.hasFrame, approximations };
+      if (comparison) {
+        if (this.live) this.destroyState(this.live);
+        this.live = undefined;
+        this.root.scale.set(1);
+        this.root.position.set(0, 0);
+        const states = [
+          required(this.comparison).current,
+          required(this.comparison).historical,
+        ];
+        for (const state of states)
+          this.root.addChild(required(state.wrapper), required(state.mask));
+        preparations.forEach((preparation, index) => {
+          const state = required(states[index]);
+          this.commitScene(state, preparation);
+          const [r, g, b, alpha] = preparation.scene.background ?? [0, 0, 0, 1];
+          required(state.background)
+            .clear()
+            .rect(0, 0, this.viewport.width, this.viewport.height)
+            .fill({ color: [r, g, b], alpha });
+          const boundary = comparison.split * this.viewport.width;
+          required(state.mask)
+            .clear()
+            .rect(
+              index === 0 ? 0 : boundary,
+              0,
+              index === 0 ? boundary : this.viewport.width - boundary,
+              this.viewport.height,
+            )
+            .fill(0xffffff);
+        });
+        // Each branch owns its clear plane, including alpha. The shared stage
+        // must not turn transparent project backgrounds into opaque black.
+        this.app.renderer.background.color = 0;
+        this.app.renderer.background.alpha = 0;
+      } else {
+        this.exitComparison();
+        this.commitScene(required(this.live), required(preparations[0]));
+        const [r, g, b, alpha] = scene.background ?? [0, 0, 0, 1];
+        this.app.renderer.background.color = [r, g, b];
+        this.app.renderer.background.alpha = alpha;
+      }
+      approximations = collectApproximations();
       this.app.render();
       this.hasFrame = true;
       if (!options.capture)
@@ -717,19 +954,20 @@ export class PixiRenderer implements SceneRenderer {
       releasePrepared();
     }
   }
-  private destroyPair(id: string): void {
-    const pair = this.pairs.get(id);
+  private destroyPair(state: BranchState, id: string): void {
+    const pair = state.pairs.get(id);
     if (!pair) return;
-    for (const node of this.nodes.values())
+    for (const node of state.nodes.values())
       if (node.container.parent === pair.container)
-        required(this.root).addChild(node.container);
+        state.root.addChild(node.container);
     pair.container.filters = [];
     pair.filter.destroy();
     pair.black.destroy();
     pair.container.destroy({ children: false });
-    this.pairs.delete(id);
+    state.pairs.delete(id);
   }
   private compositePairs(
+    state: BranchState,
     scene: SceneGraph,
     warn: (id: string, reason: string) => void,
   ): void {
@@ -737,8 +975,8 @@ export class PixiRenderer implements SceneRenderer {
     const byClip = new Map<string, ResolvedTransitionPair>();
     for (const pair of scene.transitionPairs ?? []) {
       if (
-        !this.nodes.has(pair.outgoingClipId) ||
-        !this.nodes.has(pair.incomingClipId) ||
+        !state.nodes.has(pair.outgoingClipId) ||
+        !state.nodes.has(pair.incomingClipId) ||
         byClip.has(pair.outgoingClipId) ||
         byClip.has(pair.incomingClipId)
       ) {
@@ -753,9 +991,9 @@ export class PixiRenderer implements SceneRenderer {
       byClip.set(pair.incomingClipId, pair);
     }
     const active = new Set(pairs.map((p) => p.id));
-    for (const id of this.pairs.keys())
-      if (!active.has(id)) this.destroyPair(id);
-    for (const [id, node] of this.nodes)
+    for (const id of state.pairs.keys())
+      if (!active.has(id)) this.destroyPair(state, id);
+    for (const [id, node] of state.nodes)
       if (!byClip.has(id) && node.pairBlend) {
         node.container.filters = [];
         node.pairBlend.destroy();
@@ -763,7 +1001,7 @@ export class PixiRenderer implements SceneRenderer {
       }
     const p = required(this.pixi);
     for (const descriptor of pairs) {
-      let pair = this.pairs.get(descriptor.id);
+      let pair = state.pairs.get(descriptor.id);
       if (!pair) {
         const container = new p.Container({
             label: `transition:${descriptor.id}`,
@@ -774,9 +1012,9 @@ export class PixiRenderer implements SceneRenderer {
         filter.configure('mask', {}, scene.frame);
         container.filters = [filter];
         container.addChild(black);
-        required(this.root).addChild(container);
+        state.root.addChild(container);
         pair = { container, black, filter, size: '' };
-        this.pairs.set(descriptor.id, pair);
+        state.pairs.set(descriptor.id, pair);
       }
       const size = `${scene.width}:${scene.height}`;
       if (pair.size !== size) {
@@ -787,8 +1025,8 @@ export class PixiRenderer implements SceneRenderer {
       pair.black.visible = descriptor.blackWeight > 0;
       pair.black.blendMode =
         descriptor.composite === 'premultiplied_mix' ? 'add' : 'normal';
-      const outgoing = required(this.nodes.get(descriptor.outgoingClipId)),
-        incoming = required(this.nodes.get(descriptor.incomingClipId));
+      const outgoing = required(state.nodes.get(descriptor.outgoingClipId)),
+        incoming = required(state.nodes.get(descriptor.incomingClipId));
       pair.container.addChild(outgoing.container, incoming.container);
       for (const [member, weight] of [
         [outgoing, descriptor.outgoingWeight],
@@ -812,13 +1050,14 @@ export class PixiRenderer implements SceneRenderer {
       const pair = byClip.get(layer.clipId);
       if (pair && pair.compositeAtClipId !== layer.clipId) continue;
       const display = pair
-        ? required(this.pairs.get(pair.id)).container
-        : required(this.nodes.get(layer.clipId)).container;
-      if (display.parent !== this.root) required(this.root).addChild(display);
-      required(this.root).setChildIndex(display, index++);
+        ? required(state.pairs.get(pair.id)).container
+        : required(state.nodes.get(layer.clipId)).container;
+      if (display.parent !== state.root) state.root.addChild(display);
+      state.root.setChildIndex(display, index++);
     }
   }
   private updateNode(
+    state: BranchState,
     node: LayerNode,
     layer: ResolvedLayer,
     scene: SceneGraph,
@@ -945,7 +1184,7 @@ export class PixiRenderer implements SceneRenderer {
         layer.mask?.invert,
         layer.mask?.feather,
         layer.mask?.metadata?.channel ?? 'red',
-        required(this.root).scale.x,
+        state.root.scale.x,
       );
       issues.forEach((reason) => warn(layer.clipId, reason));
       filter.setMapping(node.sprite);
@@ -1082,20 +1321,14 @@ export class PixiRenderer implements SceneRenderer {
     ++this.revision;
     this.pendingPreparations.forEach((cancel) => cancel());
     this.pendingPreparations.clear();
-    for (const id of this.nodes.keys()) this.destroyNode(id);
-    for (const id of this.pairs.keys()) this.destroyPair(id);
-    // Any zero-reference entry from a failed submit is also reclaimed.
-    this.textures.forEach((entry) => {
-      entry.texture.destroy(true);
-      entry.lease.release?.();
-    });
-    this.textures.clear();
+    this.exitComparison();
+    if (this.live) this.destroyState(this.live);
+    this.live = undefined;
     this.app?.destroy(
       { removeView: false },
       { children: true, texture: false, textureSource: false },
     );
     this.app = undefined;
     this.root = undefined;
-    this.fonts.clear();
   }
 }

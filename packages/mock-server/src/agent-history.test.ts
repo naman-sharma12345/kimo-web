@@ -107,8 +107,11 @@ describe('process-lifetime recorded presentation history', () => {
           [
             'agent.status',
             'agent.action.start',
+            'agent.action.progress',
             'agent.action.end',
             'agent.message',
+            'asset.added',
+            'sam.mask',
             'error',
           ].includes(event.t),
         ),

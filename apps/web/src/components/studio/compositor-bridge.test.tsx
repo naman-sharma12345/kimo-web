@@ -7,10 +7,20 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { KimoProject, SessionSnapshot, ServerEvent } from '@kimo/client';
+import {
+  projectSchema,
+  type KimoProject,
+  type SessionSnapshot,
+  type ServerEvent,
+} from '@kimo/client';
 import { useStudio } from '@/stores/studio';
 import { useProject } from '@/stores/project';
 import { useEditing } from '@/stores/editing';
+import { createCutStore } from '@/lib/studio-finish';
+import {
+  fixture as restoreFixture,
+  assets as restoreAssets,
+} from '@/lib/editing/test-fixtures';
 import { withBuiltinAssets } from './builtin-assets';
 import {
   StudioCompositor,
@@ -20,6 +30,12 @@ import { StudioShell } from './studio-shell';
 const mocks = vi.hoisted(() => ({
   router: { push: vi.fn() },
   created: vi.fn(),
+  comparison: vi.fn(),
+  comparisonSplit: vi.fn(),
+  comparisonStop: vi.fn(),
+  comparisonListener: undefined as
+    | ((state: Readonly<import('@kimo/compositor').ComparisonState>) => void)
+    | undefined,
   previewProject: null as KimoProject | null,
   init: vi.fn(async (): Promise<void> => undefined),
   dispose: vi.fn(),
@@ -99,6 +115,21 @@ vi.mock('@kimo/compositor', () => ({
     getFilmstrip = vi.fn();
     getWaveform = vi.fn();
     getAudioLevel = mocks.audioLevel;
+    setComparison = mocks.comparison;
+    setComparisonSplit = mocks.comparisonSplit;
+    getComparisonState = () => ({
+      phase: 'inactive' as const,
+      id: null,
+      split: 0.5,
+      reason: null,
+      requiredDecoders: 0,
+      approximations: [],
+    });
+    subscribeComparison = (listener: typeof mocks.comparisonListener) => {
+      mocks.comparisonListener = listener;
+      return mocks.comparisonStop;
+    };
+    getCutComparisonCapability = () => ({ available: true as const });
   },
 }));
 const project: KimoProject = {
@@ -712,5 +743,201 @@ describe('historical cut projection (mocked controller, no GPU acceptance)', () 
     expect(mocks.event).not.toHaveBeenCalled();
     expect(ref.current).toBeNull();
     expect(useStudio.getState().previewStatus).toBe('legacy');
+  });
+});
+
+describe('cut comparison bridge (structural, not GPU evidence)', () => {
+  it('keeps one controller and live projection, changes only split, exits and releases its subscription', async () => {
+    const bridgeRef = React.createRef<StudioCompositorHandle>();
+    const onComparisonChange = vi.fn();
+    const historical = { ...project, version: 0 };
+    const input = { id: 'cut-1', project: historical, assets: [], split: 0.5 };
+    const result = render(
+      <StudioCompositor
+        project={project}
+        assets={[]}
+        comparison={input}
+        onComparisonChange={onComparisonChange}
+        bridgeRef={bridgeRef}
+      />,
+    );
+    await waitFor(() =>
+      expect(useStudio.getState().previewStatus).toBe('ready'),
+    );
+    expect(mocks.created).toHaveBeenCalledTimes(1);
+    expect(mocks.comparison).toHaveBeenLastCalledWith(input);
+    const calls = mocks.comparison.mock.calls.length;
+    result.rerender(
+      <StudioCompositor
+        project={project}
+        assets={[]}
+        comparison={{ ...input, split: 0.8 }}
+        onComparisonChange={onComparisonChange}
+        bridgeRef={bridgeRef}
+      />,
+    );
+    expect(mocks.comparisonSplit).toHaveBeenLastCalledWith(0.8);
+    expect(mocks.comparison).toHaveBeenCalledTimes(calls);
+    const live = { ...project, version: 9 };
+    act(() => useProject.getState().replace(live));
+    expect(mocks.updateProject).toHaveBeenLastCalledWith(live);
+    act(() =>
+      mocks.comparisonListener?.({
+        phase: 'preparing',
+        id: input.id,
+        split: 0.8,
+        reason: null,
+        requiredDecoders: 2,
+        approximations: [],
+      }),
+    );
+    expect(onComparisonChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phase: 'preparing' }),
+    );
+    result.rerender(
+      <StudioCompositor
+        project={live}
+        assets={[]}
+        comparison={null}
+        bridgeRef={bridgeRef}
+      />,
+    );
+    expect(mocks.comparison).toHaveBeenLastCalledWith(null);
+    expect(mocks.created).toHaveBeenCalledTimes(1);
+    result.unmount();
+    expect(mocks.comparisonStop).toHaveBeenCalledOnce();
+    expect(mocks.dispose).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Studio guarded restore UI binding', () => {
+  it('reviews exact live authority before dispatch and keeps an unknown restore read-only without repeating it', async () => {
+    localStorage.clear();
+    localStorage.setItem('kimo-shortcuts-dismissed:v1', 'true');
+    const target = projectSchema.parse(restoreFixture());
+    target.notes = 'saved cut notes';
+    const current = projectSchema.parse(restoreFixture());
+    current.notes = 'current edit notes';
+    const cut = createCutStore(localStorage).capture({
+      sessionId: 'restore-ui',
+      requestId: 'r',
+      project: target,
+      assets: restoreAssets,
+      createdAt: 1,
+    });
+    const undo = vi.fn();
+    const redo = vi.fn();
+    const keyboard = vi.fn();
+    render(
+      <StudioShell
+        sessionId="restore-ui"
+        snapshot={{
+          status: 'editing',
+          project: current,
+          assets: restoreAssets,
+        }}
+        originalPrompt="restore test"
+        subscribe={false}
+        commands={{ undo, redo, keyboard }}
+      />,
+    );
+    await waitFor(() =>
+      expect(useEditing.getState().state?.persistenceStatus).toBe('ready'),
+    );
+    const live = useEditing.getState().session;
+    if (!live) throw new Error('missing editor');
+    const dispatch = vi
+      .spyOn(live, 'editGroup')
+      .mockResolvedValue({ id: 'restore-1', status: 'unknown' });
+    fireEvent.change(screen.getByLabelText('cuts on this device'), {
+      target: { value: cut.id },
+    });
+    expect(screen.getByRole('button', { name: 'undo (⌘Z)' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /redo/ })).toBeDisabled();
+    fireEvent.keyDown(document, { key: 'z', metaKey: true });
+    expect(keyboard).not.toHaveBeenCalled();
+    expect(undo).not.toHaveBeenCalled();
+    const restore = screen.getByRole('button', { name: 'restore this cut' });
+    await waitFor(() => expect(restore).toBeEnabled());
+    fireEvent.click(restore);
+    expect(dispatch).not.toHaveBeenCalled();
+    const confirms = screen.getAllByRole('button', {
+      name: 'restore this cut',
+    });
+    const confirm = confirms[confirms.length - 1];
+    if (!confirm) throw new Error('missing restore confirmation');
+    fireEvent.click(confirm);
+    await waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.any(Array),
+      'restore cut 1',
+      'history',
+      {
+        strictGuard: expect.objectContaining({
+          sessionId: 'restore-ui',
+          projectId: current.id,
+          version: current.version,
+        }),
+      },
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'restore acceptance is unknown. do not repeat it; reconcile the current edit first.',
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      document.querySelector('[aria-label="read-only cut preview"]'),
+    ).toBeInTheDocument();
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
+  it('mounts one comparison renderer even when the current branch is empty', async () => {
+    localStorage.clear();
+    localStorage.setItem('kimo-shortcuts-dismissed:v1', 'true');
+    const target = projectSchema.parse(restoreFixture());
+    const cut = createCutStore(localStorage).capture({
+      sessionId: 'empty-compare',
+      requestId: 'r',
+      project: target,
+      assets: restoreAssets,
+      createdAt: 1,
+    });
+    render(
+      <StudioShell
+        sessionId="empty-compare"
+        snapshot={{
+          status: 'editing',
+          project: { ...target, clips: {} },
+          assets: restoreAssets,
+        }}
+        originalPrompt="compare test"
+        subscribe={false}
+      />,
+    );
+    await waitFor(() =>
+      expect(useStudio.getState().previewStatus).toBe('ready'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'compare cuts' }));
+    fireEvent.change(screen.getByLabelText('comparison cut'), {
+      target: { value: cut.id },
+    });
+    await waitFor(() =>
+      expect(mocks.comparison).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: cut.id }),
+      ),
+    );
+    expect(screen.getByTestId('compositor')).toHaveAttribute(
+      'data-comparison',
+      'active',
+    );
+    expect(mocks.created).toHaveBeenCalledOnce();
+    const exit = screen.getAllByRole('button', { name: 'exit comparison' })[0];
+    if (!exit) throw new Error('missing comparison exit');
+    fireEvent.click(exit);
+    await waitFor(() =>
+      expect(mocks.comparison).toHaveBeenLastCalledWith(null),
+    );
+    expect(mocks.created).toHaveBeenCalledOnce();
   });
 });

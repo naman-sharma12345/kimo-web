@@ -19,6 +19,15 @@ import {
   type TimestampedFrame,
 } from './filmstrip';
 import { buildScene } from './scene-builder';
+import {
+  comparisonAsset,
+  comparisonInstance,
+  comparisonResources,
+  comparisonSplit,
+  type ComparisonInput,
+  type ComparisonState,
+  type CutComparisonCapability,
+} from './comparison';
 import type { MediaFrame, VideoRequest } from './media-types';
 import type {
   SceneRenderer,
@@ -97,6 +106,13 @@ export interface ControllerPreviewAPI {
   getAudioLevel(): AudioLevels;
   getAudioCapabilities(clipId: string): AudioCapabilities;
   getCompareCapability(): { available: false; reason: string };
+  setComparison(input: ComparisonInput | null): void;
+  setComparisonSplit(split: number): void;
+  getComparisonState(): Readonly<ComparisonState>;
+  subscribeComparison(
+    listener: (state: Readonly<ComparisonState>) => void,
+  ): () => void;
+  getCutComparisonCapability(): CutComparisonCapability;
 }
 export interface ControllerOptions {
   project: KimoProject;
@@ -181,6 +197,24 @@ export class CompositorController implements ControllerPreviewAPI {
     resolve: (result: RenderResult) => void;
     reject: (error: Error) => void;
   } | null = null;
+  private comparison: ComparisonInput | null = null;
+  private comparisonGeneration = 0;
+  private historicalAssets: Record<string, Asset> = {};
+  private currentCache = new Map<string, Asset>();
+  private historicalCache = new Map<string, Asset>();
+  private comparisonListeners = new Set<
+    (state: Readonly<ComparisonState>) => void
+  >();
+  private comparisonState: Readonly<ComparisonState> = Object.freeze({
+    phase: 'inactive',
+    id: null,
+    split: 0.5,
+    reason: null,
+    requiredDecoders: 0,
+    approximations: Object.freeze([]),
+  });
+  private allocationSignature: string | null = null;
+  private resourceFailures = new Map<string, string>();
   private transportIntent = 0;
   private project: KimoProject;
   private assets: Record<string, Asset> = {};
@@ -364,9 +398,111 @@ export class CompositorController implements ControllerPreviewAPI {
       reason: 'Isolated before/after grade composition is not implemented',
     };
   }
+  getCutComparisonCapability(): CutComparisonCapability {
+    if (this.disposed)
+      return { available: false, reason: 'Compositor disposed' };
+    return this.renderer.renderComparison && this.renderer.cancelPending
+      ? { available: true }
+      : {
+          available: false,
+          reason: 'Renderer does not support cancellable cut comparison',
+        };
+  }
+  getComparisonState(): Readonly<ComparisonState> {
+    return this.comparisonState;
+  }
+  subscribeComparison(
+    listener: (state: Readonly<ComparisonState>) => void,
+  ): () => void {
+    if (this.disposed) return () => undefined;
+    this.comparisonListeners.add(listener);
+    return () => {
+      this.comparisonListeners.delete(listener);
+    };
+  }
+  private comparisonStatus(
+    phase: ComparisonState['phase'],
+    reason: string | null = null,
+    requiredDecoders = this.comparisonState.requiredDecoders,
+    approximations: readonly string[] = [],
+  ): void {
+    const next: Readonly<ComparisonState> = Object.freeze({
+      phase,
+      id: this.comparison?.id ?? null,
+      split: this.comparison?.split ?? 0.5,
+      reason,
+      requiredDecoders,
+      approximations: Object.freeze([...approximations]),
+    });
+    if (JSON.stringify(next) === JSON.stringify(this.comparisonState)) return;
+    this.comparisonState = next;
+    for (const listener of this.comparisonListeners) listener(next);
+  }
+  setComparison(input: ComparisonInput | null): void {
+    if (this.disposed) return;
+    // Clone before changing authority; invalid inputs cannot tear down a valid comparison.
+    const detached = input
+      ? structuredClone({ ...input, split: comparisonSplit(input.split) })
+      : null;
+    this.audio.pause();
+    this.allocationSignature = null;
+    this.comparisonGeneration++;
+    for (const key of this.historicalCache.keys()) {
+      this.resourceFailures.delete(key);
+      this.unpinImage(key);
+      this.images.delete(key);
+      this.imageLoads.delete(key);
+      this.rleLoads.get(key)?.abort();
+      this.rleLoads.delete(key);
+      this.rle.delete(key);
+    }
+    this.historicalCache.clear();
+    this.historicalAssets = {};
+    this.comparison = detached;
+    this.frames.clear();
+    this.follow = null;
+    this.editingTextClip = null;
+    this.options.onEditAt?.(null);
+    if (detached) {
+      this.historicalAssets = Object.fromEntries(
+        detached.assets.map((asset) => [asset.id, asset]),
+      );
+      for (const asset of detached.assets) {
+        const key = comparisonAsset(this.comparisonGeneration, asset.id);
+        this.historicalCache.set(key, asset);
+        if (asset.mask?.encoding === 'rle') void this.loadRle(asset, key);
+        else if (asset.kind === 'image') this.loadImage(asset, key);
+      }
+      this.setTransport({
+        ...this.transport,
+        playing: false,
+        scrubbing: false,
+        shuttle: 0,
+      });
+    }
+    this.invalidate();
+    const capability = this.getCutComparisonCapability();
+    this.comparisonStatus(
+      detached
+        ? capability.available
+          ? 'preparing'
+          : 'unavailable'
+        : 'inactive',
+      detached && !capability.available ? capability.reason : null,
+      0,
+    );
+  }
+  setComparisonSplit(value: number): void {
+    const split = comparisonSplit(value);
+    if (this.disposed || !this.comparison || split === this.comparison.split)
+      return;
+    this.comparison = { ...this.comparison, split };
+    this.invalidate();
+  }
   /** Preview-only suppression; published scene remains measurable and no op is produced. */
   setEditingTextClip(clipId: string | null): void {
-    if (this.disposed || clipId === this.editingTextClip) return;
+    if (this.disposed || this.comparison || clipId === this.editingTextClip)
+      return;
     this.transportIntent++;
     this.editingTextClip = clipId;
     this.invalidate();
@@ -378,6 +514,8 @@ export class CompositorController implements ControllerPreviewAPI {
   ): Promise<PosterResult> {
     if (this.disposed || !this.ready)
       throw new Error('poster unavailable: compositor not ready');
+    if (this.comparison)
+      throw new Error('poster unavailable: leave cut comparison first');
     if (this.capture) throw new Error('poster capture already active');
     if (this.editingTextClip)
       throw new Error('poster unavailable: finish text editing first');
@@ -471,6 +609,7 @@ export class CompositorController implements ControllerPreviewAPI {
       );
     this.capture?.reject(new Error('poster capture invalidated'));
     this.revision++;
+    if (this.comparison) this.comparisonStatus('preparing');
     this.metrics.revision = this.revision;
     this.dirty = true;
     this.schedule();
@@ -492,45 +631,32 @@ export class CompositorController implements ControllerPreviewAPI {
     if (JSON.stringify(next) === JSON.stringify(this.assets)) return;
     for (const [id, previous] of Object.entries(this.assets))
       if (JSON.stringify(previous) !== JSON.stringify(next[id])) {
-        this.unpinImage(id);
-        this.images.delete(id);
-        this.imageLoads.delete(id);
+        const key = this.currentAssetKey(id);
+        this.currentCache.delete(key);
+        this.resourceFailures.delete(key);
+        this.unpinImage(key);
+        this.images.delete(key);
+        this.imageLoads.delete(key);
         this.audioLoads.delete(id);
-        this.rleLoads.get(id)?.abort();
-        this.rleLoads.delete(id);
-        this.rle.delete(id);
+        this.rleLoads.get(key)?.abort();
+        this.rleLoads.delete(key);
+        this.rle.delete(key);
         this.imageAppearance.delete(id);
       }
     this.assets = next;
     for (const asset of assets) {
-      if (asset.mask?.encoding === 'rle' && !this.rleLoads.has(asset.id))
-        void this.loadRle(asset);
+      const key = this.currentAssetKey(asset.id);
+      this.currentCache.set(key, asset);
+      if (asset.mask?.encoding === 'rle' && !this.rleLoads.has(key))
+        void this.loadRle(asset, key);
       if (
         asset.kind === 'image' &&
         asset.mask?.encoding !== 'rle' &&
-        !this.imageLoads.has(asset.id)
+        !this.imageLoads.has(key)
       ) {
-        const identity = asset;
-        const promise = this.pool
-          .acquireImage(asset)
-          .then((lease) => {
-            if (
-              !this.disposed &&
-              this.assets[asset.id]?.url === identity.url &&
-              this.assets[asset.id]?.proxyUrl === identity.proxyUrl
-            ) {
-              this.images.set(asset.id, lease.bitmap);
-              this.imagePins.set(asset.id, {
-                release: lease.release,
-                refs: 0,
-                owned: true,
-              });
-              this.invalidate();
-            } else lease.release();
-          })
-          .catch((error) => this.issue(String(error)));
-        this.imageLoads.set(asset.id, promise);
+        this.loadImage(asset, key);
       }
+
       if (asset.kind === 'audio' && !this.audioLoads.has(asset.id)) {
         this.audioLoads.set(
           asset.id,
@@ -545,6 +671,43 @@ export class CompositorController implements ControllerPreviewAPI {
     }
     this.invalidate();
   }
+  private currentAssetKey(id: string): string {
+    return JSON.stringify(['asset', 'current', id]);
+  }
+  private cachedAsset(key: string): Asset | undefined {
+    return this.historicalCache.get(key) ?? this.currentCache.get(key);
+  }
+  private loadImage(asset: Asset, key: string): void {
+    const promise = this.pool
+      .acquireImage(asset)
+      .then((lease) => {
+        if (
+          !this.disposed &&
+          JSON.stringify(this.cachedAsset(key)) === JSON.stringify(asset) &&
+          this.imageLoads.get(key) === promise
+        ) {
+          this.images.set(key, lease.bitmap);
+          this.imagePins.set(key, {
+            release: lease.release,
+            refs: 0,
+            owned: true,
+          });
+          this.invalidate();
+        } else lease.release();
+      })
+      .catch((error) => {
+        if (
+          !this.disposed &&
+          this.imageLoads.get(key) === promise &&
+          JSON.stringify(this.cachedAsset(key)) === JSON.stringify(asset)
+        ) {
+          this.resourceFailures.set(key, String(error));
+          this.invalidate();
+          this.issue(String(error));
+        }
+      });
+    this.imageLoads.set(key, promise);
+  }
   private unpinImage(id: string): void {
     const pin = this.imagePins.get(id);
     if (!pin) return;
@@ -552,11 +715,11 @@ export class CompositorController implements ControllerPreviewAPI {
     this.imagePins.delete(id);
     if (pin.refs === 0) pin.release();
   }
-  private async loadRle(asset: Asset): Promise<void> {
+  private async loadRle(asset: Asset, key: string): Promise<void> {
     if (asset.mask?.encoding !== 'rle') return;
     const metadata = asset.mask,
       abort = new AbortController();
-    this.rleLoads.set(asset.id, abort);
+    this.rleLoads.set(key, abort);
     const timeout = setTimeout(() => abort.abort(), 10000);
     try {
       const response = await fetch(metadata.payloadUrl, {
@@ -592,7 +755,7 @@ export class CompositorController implements ControllerPreviewAPI {
             'RLE metadata mismatch or decoded memory budget exceeded',
           );
         resources.set(frame.frameIndex, {
-          key: `rle:${asset.id}:${metadata.payloadUrl}:${frame.frameIndex}`,
+          key: `rle:${key}:${metadata.payloadUrl}:${frame.frameIndex}`,
           source: {
             data: decodeRLE(frame.width, frame.height, frame.counts),
             width: frame.width,
@@ -602,18 +765,23 @@ export class CompositorController implements ControllerPreviewAPI {
           height: frame.height,
         });
       }
-      const currentMetadata = this.assets[asset.id]?.mask;
+      const currentMetadata = this.cachedAsset(key)?.mask;
       if (
         !this.disposed &&
         !abort.signal.aborted &&
+        this.rleLoads.get(key) === abort &&
         currentMetadata?.encoding === 'rle' &&
         currentMetadata.payloadUrl === metadata.payloadUrl
       ) {
-        this.rle.set(asset.id, resources);
+        this.rle.set(key, resources);
         this.invalidate();
       }
     } catch (error) {
-      if (!this.disposed && !abort.signal.aborted) this.issue(String(error));
+      if (!this.disposed && this.rleLoads.get(key) === abort) {
+        this.resourceFailures.set(key, String(error));
+        this.invalidate();
+        this.issue(String(error));
+      }
     } finally {
       clearTimeout(timeout);
     }
@@ -735,7 +903,11 @@ export class CompositorController implements ControllerPreviewAPI {
           ? this.project.clips[event.target.clipId]?.start
           : undefined);
       this.follow = null;
-      if (target !== undefined && this.transport.followKimo) {
+      if (
+        !this.comparison &&
+        target !== undefined &&
+        this.transport.followKimo
+      ) {
         this.transportIntent++;
         this.capture?.reject(
           new Error('poster capture invalidated by follow intent'),
@@ -797,19 +969,33 @@ export class CompositorController implements ControllerPreviewAPI {
     request: RendererResourceRequest,
   ): PreparedRendererResource | undefined => {
     if (this.disposed) return;
+    const historical = request.branch === 'historical';
+    if (historical && !this.comparison) return;
+    const assetKey = historical
+      ? comparisonAsset(this.comparisonGeneration, request.assetId)
+      : this.currentAssetKey(request.assetId);
     if (request.role === 'mask') {
-      const metadata = this.assets[request.assetId]?.mask;
+      const metadata = this.cachedAsset(assetKey)?.mask;
       if (metadata?.encoding === 'rle') {
         const index =
           request.frameIndex ??
           Math.floor(
             (request.sourceTime - (metadata.timeOrigin ?? 0)) * metadata.fps,
           );
-        return this.rle.get(request.assetId)?.get(index);
+        return this.rle.get(assetKey)?.get(index);
       }
     }
     const frame = this.frames.get(
-      request.role === 'mask' ? `${request.clipId}:mask` : request.clipId,
+      this.comparison && request.role !== 'lut'
+        ? comparisonInstance(
+            this.comparisonGeneration,
+            request.branch ?? 'current',
+            request.clipId,
+            request.role,
+          )
+        : request.role === 'mask'
+          ? `${request.clipId}:mask`
+          : request.clipId,
     );
     if (frame && request.role !== 'lut') {
       let id = this.resourceIds.get(frame.element);
@@ -819,6 +1005,7 @@ export class CompositorController implements ControllerPreviewAPI {
       }
       return {
         key: `video:${id}`,
+        revision: frame.sourceTime,
         source: frame.element,
         width: frame.element.videoWidth,
         height: frame.element.videoHeight,
@@ -827,9 +1014,9 @@ export class CompositorController implements ControllerPreviewAPI {
           : (frame.reason ?? 'decoded frame timing not exact'),
       };
     }
-    const bitmap = this.images.get(request.assetId);
+    const bitmap = this.images.get(assetKey);
     if (bitmap) {
-      const pin = this.imagePins.get(request.assetId);
+      const pin = this.imagePins.get(assetKey);
       if (!pin) return;
       pin.refs++;
       let released = false;
@@ -894,6 +1081,10 @@ export class CompositorController implements ControllerPreviewAPI {
     const ingress = this.ingress;
     const current = () => !this.disposed && revision === this.revision;
     try {
+      if (this.comparison) {
+        await this.prepareComparison(revision, project, assets, time);
+        return;
+      }
       const scene = buildScene(project, time, {
         assets,
         masterVolume: this.transport.volume,
@@ -905,7 +1096,7 @@ export class CompositorController implements ControllerPreviewAPI {
           layer.kind === 'image' &&
           layer.assetId &&
           assets[layer.assetId]?.source === 'web' &&
-          this.images.has(layer.assetId)
+          this.images.has(this.currentAssetKey(layer.assetId))
         ) {
           const started = this.imageAppearance.get(layer.assetId) ?? this.now();
           this.imageAppearance.set(layer.assetId, started);
@@ -1091,8 +1282,14 @@ export class CompositorController implements ControllerPreviewAPI {
         this.capture.reject(
           error instanceof Error ? error : new Error(String(error)),
         );
-      if (current())
-        this.issue(error instanceof Error ? error.message : String(error));
+      if (current()) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (this.comparison) {
+          this.stopComparisonPlayback();
+          this.comparisonStatus('unavailable', reason);
+        }
+        this.issue(reason);
+      }
     } finally {
       this.renderInFlight = false;
       this.preparing = false;
@@ -1100,6 +1297,189 @@ export class CompositorController implements ControllerPreviewAPI {
         this.schedule();
       this.publish();
     }
+  }
+  private stopComparisonPlayback(): void {
+    this.clock.pause();
+    this.transport = { ...this.transport, playing: false };
+    this.audio.pause();
+    for (const frame of this.frames.values()) {
+      frame.element.pause();
+      frame.element.muted = true;
+    }
+  }
+  private async prepareComparison(
+    revision: number,
+    project: KimoProject,
+    assets: Record<string, Asset>,
+    time: number,
+  ): Promise<void> {
+    const comparison = this.comparison;
+    if (!comparison) return;
+    const current = () =>
+      !this.disposed &&
+      this.revision === revision &&
+      this.comparison === comparison;
+    const render = this.renderer.renderComparison?.bind(this.renderer);
+    const capability = this.getCutComparisonCapability();
+    if (!render || !capability.available) {
+      this.stopComparisonPlayback();
+      this.comparisonStatus(
+        'unavailable',
+        'Renderer does not support cancellable cut comparison',
+        0,
+      );
+      return;
+    }
+    const scene = buildScene(project, time, {
+      assets,
+      masterVolume: this.transport.volume,
+    });
+    const historical = buildScene(comparison.project, time, {
+      assets: this.historicalAssets,
+      masterVolume: 0,
+    });
+    const live = comparisonResources(
+      project,
+      assets,
+      scene,
+      'current',
+      this.comparisonGeneration,
+    );
+    const past = comparisonResources(
+      comparison.project,
+      this.historicalAssets,
+      historical,
+      'historical',
+      this.comparisonGeneration,
+    );
+    const requests = [...live.videos, ...past.videos];
+    const demand = new Set(requests.map((request) => request.clipId)).size;
+    if (demand > 6) {
+      this.stopComparisonPlayback();
+      this.comparisonStatus(
+        'unavailable',
+        `Cut comparison requires ${demand} active video decoders; shared limit is 6`,
+        demand,
+      );
+      return;
+    }
+    // Disconnect old element-source voices BEFORE pool allocation can recycle their elements
+    // into historical/mask roles. Stable allocations keep continuous current audio graphs.
+    const signature = JSON.stringify(
+      requests.map((request) => [request.clipId, request.asset]),
+    );
+    if (signature !== this.allocationSignature) this.audio.pause();
+    this.allocationSignature = signature;
+    const result = await this.pool.sync(requests, {
+      time,
+      playing: this.clock.playing,
+      rate: this.transport.speed,
+      fps: project.fps,
+      fast: this.transport.scrubbing,
+    });
+    if (!current()) return;
+    this.frames = result.frames;
+    const elements = new Map<string, HTMLMediaElement>();
+    for (const [id, frame] of result.frames) {
+      const clipId = live.currentMedia.get(id);
+      if (clipId !== undefined) elements.set(clipId, frame.element);
+      else frame.element.muted = true;
+    }
+    this.monitorVideo(
+      [...result.frames].find(([id]) => live.currentMedia.has(id))?.[1]
+        ?.element,
+    );
+    result.issues.forEach((message) => this.issue(message));
+    const missing = [...live.resources, ...past.resources].filter(
+      (request) => !this.hasResource(request),
+    );
+    if (missing.length) this.stopComparisonPlayback();
+    const syncAudio = () =>
+      this.audio.sync(
+        Object.values(project.clips),
+        project.tracks,
+        time,
+        {
+          playing: this.clock.playing,
+          rate: this.transport.speed,
+          master: this.transport.volume,
+          epoch: this.clock.loopRevision,
+        },
+        elements,
+      );
+    if (!current()) return;
+    if (missing.length) {
+      syncAudio();
+      const failed = missing
+        .map((request) => {
+          const key =
+            request.branch === 'historical'
+              ? comparisonAsset(this.comparisonGeneration, request.assetId)
+              : this.currentAssetKey(request.assetId);
+          if (!this.cachedAsset(key))
+            return `Asset unavailable in ${request.branch} cut: ${request.assetId}`;
+          if (this.rle.has(key))
+            return `RLE comparison frame unavailable: ${request.assetId}`;
+          return this.resourceFailures.get(key);
+        })
+        .find(Boolean);
+      const videoFailure = missing.some((request) => {
+        const catalogue =
+          request.branch === 'historical' ? this.historicalAssets : assets;
+        return catalogue[request.assetId]?.kind === 'video';
+      });
+      this.comparisonStatus(
+        failed || videoFailure ? 'unavailable' : 'preparing',
+        failed ??
+          (videoFailure
+            ? result.issues.join('; ') ||
+              'Decoded comparison video frame unavailable'
+            : `Waiting for ${missing.length} comparison resource(s)`),
+        demand,
+        result.issues,
+      );
+      return;
+    }
+    this.renderInFlight = true;
+    const rendered = await render({
+      current: scene,
+      historical,
+      split: comparison.split,
+    });
+    this.renderInFlight = false;
+    if (!current()) return;
+    const approximations = [
+      ...result.issues,
+      ...rendered.approximations.map((value) => value.reason),
+    ];
+    if (!rendered.submitted || rendered.retained) {
+      this.stopComparisonPlayback();
+      syncAudio();
+      const failure = approximations.find((reason) =>
+        /unavailable|failed|invalid|absent|must be/i.test(reason),
+      );
+      this.comparisonStatus(
+        failure ? 'unavailable' : 'preparing',
+        failure ??
+          'Waiting for complete comparison submission (resources or fonts)',
+        demand,
+        approximations,
+      );
+      return;
+    }
+    syncAudio();
+    if (!current()) return;
+    this.submissions++;
+    this.metrics.submittedRevision = revision;
+    this.dirtyClipIds.clear();
+    this.publishedScene = scene;
+    this.options.onScene?.(scene);
+    if (this.ingress !== null) {
+      this.metrics.ingressToPrepareMs = this.now() - this.ingress;
+      this.metrics.ingressToSubmitMs = this.now() - this.ingress;
+      this.ingress = null;
+    }
+    this.comparisonStatus('ready', null, demand, approximations);
   }
   private monitorVideo(element: HTMLVideoElement | undefined): void {
     if (this.videoMonitor?.element === element) return;
@@ -1164,6 +1544,11 @@ export class CompositorController implements ControllerPreviewAPI {
     if (this.disposed) return;
     this.disposed = true;
     this.capture?.reject(new Error('poster unavailable: compositor disposed'));
+    this.comparison = null;
+    this.comparisonStatus('inactive', null, 0);
+    this.comparisonListeners.clear();
+    this.historicalCache.clear();
+    this.currentCache.clear();
     this.publishedScene = null;
     this.editingTextClip = null;
     this.revision++;
@@ -1188,5 +1573,6 @@ export class CompositorController implements ControllerPreviewAPI {
     this.images.clear();
     this.imageLoads.clear();
     this.audioLoads.clear();
+    this.resourceFailures.clear();
   }
 }
