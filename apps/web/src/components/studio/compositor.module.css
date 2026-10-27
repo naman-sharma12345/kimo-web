@@ -11,6 +11,7 @@
   background: var(--ink-0);
 }
 .surface {
+  view-transition-name: kimo-viewer;
   position: absolute;
   left: 50%;
   top: 50%;

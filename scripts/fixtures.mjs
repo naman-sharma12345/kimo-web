@@ -31,6 +31,48 @@ for (let i = 1; i <= 3; i++) {
       `${dir}/clip-${i}.mp4`,
     ]);
 }
+// Phase 9 illustrative delivery media. Pre-generated only, never runtime encoding.
+for (const [name, width, height] of [
+  ['portrait', 1080, 1920],
+  ['square', 1080, 1080],
+]) {
+  if (!existsSync(`${dir}/${name}.mp4`))
+    run([
+      '-f',
+      'lavfi',
+      '-i',
+      `testsrc2=size=${width}x${height}:rate=30:duration=8`,
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-crf',
+      '32',
+      '-pix_fmt',
+      'yuv420p',
+      '-threads',
+      '1',
+      `${dir}/${name}.mp4`,
+    ]);
+}
+for (const [name, width, height] of [
+  ['landscape', 640, 360],
+  ['portrait', 360, 640],
+  ['square', 360, 360],
+]) {
+  if (!existsSync(`${dir}/frame-${name}.jpg`))
+    run([
+      '-f',
+      'lavfi',
+      '-i',
+      `testsrc2=size=${width}x${height}`,
+      '-frames:v',
+      '1',
+      '-threads',
+      '1',
+      `${dir}/frame-${name}.jpg`,
+    ]);
+}
 if (!existsSync(`${dir}/music.wav`))
   run([
     '-f',
@@ -57,5 +99,5 @@ writeFileSync(`${dir}/mask.png`, syntheticMask());
 writeFileSync(`${dir}/identity-lut.png`, identityLut());
 writeFileSync(
   `${dir}/SOURCES.md`,
-  '# Fixture provenance\n\nThese seven fixtures are original deterministic synthetic test patterns, a sine tone, a binary ellipse luma mask and an identity 64-cube LUT atlas. scripts/fixtures.mjs uses FFmpeg for media and scripts/fixture-png.mjs for PNGs. The mask is not a SAM inference result; the LUT uses top-left origin, red x, green y and blue tile index in an 8x8 grid. No stock media, recordings, or third-party music. Dedicated CC0-1.0 by the project for these generated fixtures only. They are not represented as real footage.\n\nThe spec suggested Pexels/Pixabay CC0 URLs, but those providers’ standard licenses are not CC0. No unverified downloads were made.\n',
+  '# Fixture provenance\n\nThese fixtures are original deterministic synthetic test patterns, a sine tone, a binary ellipse luma mask and an identity 64-cube LUT atlas. scripts/fixtures.mjs uses FFmpeg for media and scripts/fixture-png.mjs for PNGs. The mask is not a SAM inference result; the LUT uses top-left origin, red x, green y and blue tile index in an 8x8 grid. No stock media, recordings, or third-party music. Dedicated CC0-1.0 by the project for these generated fixtures only. They are not represented as real footage. Phase 9 adds silent 8-second portrait (1080x1920) and square (1080x1080) MP4 test patterns and real JPEG landscape/portrait/square posters. These illustrative bytes are not project compositions, caption burn-in, engine output, model execution or mixed audio. JPEGs are repeated for available synthetic progress frames; they do not depict editorial progress.\n\nThe spec suggested Pexels/Pixabay CC0 URLs, but those providers’ standard licenses are not CC0. No unverified downloads were made.\n',
 );

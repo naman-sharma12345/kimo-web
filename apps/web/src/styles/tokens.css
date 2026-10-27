@@ -1,4 +1,31 @@
 @theme static {
+  --render-frame-width: 640px;
+  --render-frame-fade: 180ms;
+  --render-sweep: 1000ms;
+  --render-final-sweep: 400ms;
+  --render-completion: 1400ms;
+  --render-bar-stagger: 60ms;
+  --render-bar-hold: 300ms;
+  --render-row-gap: 10px;
+  --render-sheen-height: 24px;
+  --render-sheen: linear-gradient(to top, rgb(255 90 36 / 0.18), transparent);
+  --delivery-max-width: 1040px;
+  --delivery-portrait-width: 420px;
+  --delivery-title-size: clamp(40px, 5vw, 56px);
+  --delivery-play-size: 64px;
+  --delivery-controls-height: 44px;
+  --delivery-controls-bg: rgb(8 8 9 / 0.7);
+  --delivery-headline-stagger: 70ms;
+  --delivery-action-stagger: 50ms;
+  --delivery-sheen-duration: 900ms;
+  --delivery-sheen-delay: 1200ms;
+  --delivery-sheen-band: rgb(245 241 231 / 0.06);
+  --delivery-entrance-rise: 10px;
+  --render-tile-width: 64px;
+  --render-tile-height: 36px;
+  --delivery-player-thumb: 12px;
+
+  --review-play-size: 56px;
   --ink-0: #080809;
   --color-ink-0: var(--ink-0);
   --ink-1: #0e0e0f;

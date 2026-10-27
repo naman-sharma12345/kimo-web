@@ -31,6 +31,14 @@ const mocks = vi.hoisted(() => ({
   close: vi.fn(),
   playback: undefined as
     ((time: number, playing: boolean, fps: number | null) => void) | undefined,
+  getFrame: vi.fn(async () => ({
+    blob: new Blob(['readback'], { type: 'image/png' }),
+    time: 1,
+    projectVersion: 1,
+    width: 640,
+    height: 360,
+    approximations: [],
+  })),
   audioLevel: vi.fn(() => ({
     available: true,
     state: 'measuring' as const,
@@ -70,6 +78,7 @@ vi.mock('@kimo/compositor', () => ({
     setTransport = mocks.transport;
     resize = mocks.resize;
     getResource = () => undefined;
+    getFrame = mocks.getFrame;
     getFilmstrip = vi.fn();
     getWaveform = vi.fn();
     getAudioLevel = mocks.audioLevel;
@@ -453,6 +462,28 @@ describe('actual-output seam (mocked controller, no audio or GPU acceptance)', (
     stop?.();
     act(() => mocks.playback?.(2, true, 30));
     expect(sample).toHaveBeenCalledTimes(1);
+    expect(mocks.created).toHaveBeenCalledTimes(1);
+    view.unmount();
+    expect(ref.current).toBeNull();
+  });
+});
+
+describe('shared poster handle (mocked controller, not GPU acceptance)', () => {
+  it('delegates time and cancellation to the sole controller and removes the handle at disposal', async () => {
+    const ref = React.createRef<StudioCompositorHandle>();
+    const view = render(
+      <StudioCompositor project={project} assets={[]} bridgeRef={ref} />,
+    );
+    await waitFor(() => expect(mocks.init).toHaveBeenCalledTimes(1));
+    const abort = new AbortController();
+    const result = await ref.current?.getFrame?.(1, { signal: abort.signal });
+    expect(mocks.getFrame).toHaveBeenCalledWith(1, { signal: abort.signal });
+    expect(result).toMatchObject({
+      projectVersion: 1,
+      time: 1,
+      width: 640,
+      height: 360,
+    });
     expect(mocks.created).toHaveBeenCalledTimes(1);
     view.unmount();
     expect(ref.current).toBeNull();

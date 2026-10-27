@@ -21,10 +21,17 @@ const mocks = vi.hoisted(() => ({
   send: vi.fn(),
   close: vi.fn(),
   message: vi.fn(async () => {}),
+  session: vi.fn(),
+  approve: vi.fn(),
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mocks.push }) }));
 vi.mock('@/lib/api', () => ({
-  api: { connect: mocks.connect, message: mocks.message },
+  api: {
+    connect: mocks.connect,
+    message: mocks.message,
+    session: mocks.session,
+    approve: mocks.approve,
+  },
 }));
 const snapshot: SessionSnapshot = {
   status: 'editing',
@@ -55,6 +62,8 @@ beforeEach(() => {
     },
   );
   vi.clearAllMocks();
+  mocks.session.mockResolvedValue(snapshot);
+  mocks.approve.mockResolvedValue({ renderId: 'render-job' });
   localStorage.clear();
   Object.defineProperty(window, 'innerWidth', {
     value: 1920,
@@ -516,4 +525,91 @@ it('projects one actual start target into all five surfaces without fabricating 
     ),
   ).toHaveAttribute('data-action-id', 'target-action');
   expect(mocks.connect).toHaveBeenCalledTimes(1);
+});
+
+describe('Phase 9 review approval integration', () => {
+  const reviewSnapshot: SessionSnapshot = {
+    ...snapshot,
+    status: 'awaiting_review',
+    actionIds: ['recorded'],
+  };
+  it('uses the actual saved project title and confirms one approval before routing', async () => {
+    localStorage.setItem('kimo-studio-title:v1:review', 'my actual title');
+    render(
+      <StudioShell
+        sessionId="review"
+        snapshot={reviewSnapshot}
+        subscribe={false}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'finish' }));
+    expect(await screen.findByText('ready to render?')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'render 1080p' }));
+    await waitFor(() => expect(mocks.approve).toHaveBeenCalledTimes(1));
+    expect(mocks.approve.mock.calls[0]?.slice(0, 2)).toEqual([
+      'review',
+      {
+        title: 'my actual title',
+        burnInCaptions: false,
+        expectedProjectVersion: 0,
+        preset: '1080p',
+      },
+    ]);
+    await waitFor(() =>
+      expect(mocks.push).toHaveBeenCalledWith('/render/review'),
+    );
+  });
+  it('waits for the actual pause status packet before opening review while acting', async () => {
+    render(
+      <StudioShell
+        sessionId="working"
+        snapshot={{ ...reviewSnapshot, wsUrl: 'ws://example.test/working' }}
+      />,
+    );
+    act(() =>
+      mocks.receive?.({
+        t: 'agent.action.start',
+        id: 'working-step',
+        tool: 'trim_clip',
+        title: 'trimming the intro',
+        args: {},
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'finish' }));
+    expect(await screen.findByText('render now?')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'render now' }));
+    expect(mocks.send).toHaveBeenCalledWith(JSON.stringify({ t: 'pause' }));
+    expect(screen.queryByText('ready to render?')).not.toBeInTheDocument();
+    expect(mocks.approve).not.toHaveBeenCalled();
+    act(() =>
+      mocks.receive?.({ t: 'agent.status', state: 'idle', label: 'paused' }),
+    );
+    expect(await screen.findByText('ready to render?')).toBeInTheDocument();
+    expect(mocks.approve).not.toHaveBeenCalled();
+  });
+  it('blocks a second approval while a lost response remains unresolved', async () => {
+    mocks.approve.mockRejectedValue(new Error('connection lost'));
+    render(
+      <StudioShell
+        sessionId="unknown-render"
+        snapshot={reviewSnapshot}
+        subscribe={false}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'finish' }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'render 1080p' }),
+    );
+    expect(
+      await screen.findByRole('button', { name: 'check render status' }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'check render status' }),
+    );
+    await waitFor(() =>
+      expect(mocks.session.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    expect(mocks.approve).toHaveBeenCalledTimes(1);
+    expect(mocks.push).not.toHaveBeenCalled();
+  });
 });

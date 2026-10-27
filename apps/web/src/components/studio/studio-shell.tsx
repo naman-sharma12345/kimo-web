@@ -16,6 +16,14 @@ import { copyClips, pasteClips, type ClipClipboard } from './edit-clipboard';
 import { addTextAtPlayhead } from './add-text-command';
 import { ReplaceMediaDialog } from './replace-media-dialog';
 import { actionProperties } from './action-properties';
+import {
+  ReviewPrompt,
+  ReviewDialog,
+  ActingRenderDialog,
+  type PosterResult,
+} from './review';
+import { setRenderPoster, deliveryTransition } from '@/lib/render/handoff';
+import { approveCut, reconcileApproval } from '@/lib/studio-approval';
 import { clipLabel } from '@/lib/editing/display';
 import { createAgentController } from '@/lib/agent/controller';
 import {
@@ -139,7 +147,43 @@ export function StudioShell({
   const [banner, setBanner] = React.useState(true);
   const [help, setHelp] = React.useState(false);
   const [boundary, setBoundary] = React.useState('');
+  const [reviewComposer, setReviewComposer] = React.useState(false);
+  const [reviewMode, setReviewMode] = React.useState<
+    'closed' | 'acting' | 'review'
+  >('closed');
+  const [approvalPending, setApprovalPending] = React.useState(false);
+  const [approvalUnknown, setApprovalUnknown] = React.useState<{
+    baselineRenderId?: string;
+  } | null>(null);
+  const approvalLock = React.useRef(false);
+  const approvalLife = React.useRef<AbortController | null>(null);
+  const pauseObservers = React.useRef(new Set<() => void>());
+  React.useEffect(() => {
+    const life = new AbortController();
+    approvalLife.current = life;
+    setReviewMode('closed');
+    setApprovalPending(false);
+    setApprovalUnknown(null);
+    approvalLock.current = false;
+    return () => {
+      life.abort();
+      pauseObservers.current.forEach((done) => done());
+      pauseObservers.current.clear();
+    };
+  }, [sessionId]);
   const [activity, setActivity] = React.useState('');
+  const [projectTitle, setProjectTitle] = React.useState('untitled video');
+  React.useEffect(() => {
+    try {
+      setProjectTitle(
+        localStorage.getItem(`kimo-studio-title:v1:${sessionId}`) ||
+          snapshot.title ||
+          'untitled video',
+      );
+    } catch {
+      setProjectTitle(snapshot.title || 'untitled video');
+    }
+  }, [sessionId, snapshot.title]);
   const activeClipId = state.activeAction?.target?.clipId ?? null;
   const [propertyActivity, setPropertyActivity] = React.useState<
     readonly PropertyActivity[]
@@ -231,6 +275,23 @@ export function StudioShell({
 
   const defaultCompositor = React.useRef<StudioCompositorHandle | null>(null);
   const compositor = compositorRef ?? defaultCompositor;
+  const reviewPoster = React.useRef<PosterResult | null>(null);
+  const recordReviewPoster = React.useCallback(
+    (poster: PosterResult | null) => {
+      reviewPoster.current = poster;
+    },
+    [],
+  );
+  const captureReviewFrame = React.useCallback(
+    (time: number, options?: { signal?: AbortSignal }) => {
+      const capture = compositor.current?.getFrame;
+      if (!capture)
+        return Promise.reject(new Error('composited poster is unavailable'));
+      return capture(time, options);
+    },
+    [compositor],
+  );
+
   React.useEffect(() => {
     if (compositorRef) compositorRef.current?.assets(assets);
   }, [assets, compositorRef]);
@@ -372,6 +433,12 @@ export function StudioShell({
               compositor.current?.event(event);
             useStudio.getState().receive(event);
             agentController.receive(event);
+            if (
+              event.t === 'agent.status' &&
+              event.state === 'idle' &&
+              event.label === 'paused'
+            )
+              pauseObservers.current.forEach((done) => done());
             if (event.t === 'agent.action.start') {
               runningActions.add(event.id);
             }
@@ -951,9 +1018,165 @@ export function StudioShell({
       ) : undefined),
   };
   const finish = () => {
-    if (commands.finish) commands.finish();
-    else setBoundary('review flow connects in Phase 9');
+    if (commands.finish) {
+      commands.finish();
+      return;
+    }
+    if (approvalUnknown) {
+      setBoundary(
+        'render approval status is unknown; check again before making another request',
+      );
+      return;
+    }
+    setReviewMode(
+      useStudio.getState().agent === 'acting' ? 'acting' : 'review',
+    );
   };
+  const reviewReady =
+    !!editingState &&
+    !editingState.draft &&
+    editingState.pending.length === 0 &&
+    editingState.saveStatus === 'saved';
+  const navigateToRender = (videoId?: string) => {
+    const href = videoId
+      ? `/v/${encodeURIComponent(videoId)}`
+      : `/render/${encodeURIComponent(sessionId)}`;
+    if (!videoId && reviewPoster.current)
+      setRenderPoster(sessionId, reviewPoster.current.blob);
+    setReviewMode('closed');
+    deliveryTransition(
+      () => router.push(href),
+      typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    );
+  };
+  const approveReview = async (options: {
+    burnInCaptions: boolean;
+    expectedProjectVersion: number;
+    title: string;
+  }) => {
+    if (approvalLock.current || approvalUnknown) return;
+    const life = approvalLife.current;
+    if (!life || life.signal.aborted) return;
+    approvalLock.current = true;
+    setApprovalPending(true);
+    try {
+      await Promise.resolve();
+      const edit = useEditing.getState().session;
+      if (!edit) throw new Error('the edit is not connected');
+      await edit.flush();
+      const current = edit.getState();
+      if (
+        current.draft ||
+        current.pending.length ||
+        current.saveStatus !== 'saved'
+      )
+        throw new Error(
+          'finish the current edit and resolve unsaved changes before rendering',
+        );
+      if (current.acknowledgedVersion !== options.expectedProjectVersion)
+        throw new Error(
+          'the edit changed; review the current cut before rendering',
+        );
+      const outcome = await approveCut({
+        client: api,
+        sessionId,
+        options: { ...options, preset: '1080p' },
+        signal: life.signal,
+      });
+      if (life.signal.aborted || approvalLife.current !== life) return;
+      if (outcome.kind === 'accepted') {
+        navigateToRender(outcome.videoId);
+        return;
+      }
+      setReviewMode('closed');
+      if (outcome.kind === 'unknown')
+        setApprovalUnknown({ baselineRenderId: outcome.baselineRenderId });
+      setBoundary(outcome.message);
+    } catch (error) {
+      if (!life.signal.aborted) {
+        setReviewMode('closed');
+        setBoundary(
+          error instanceof Error
+            ? error.message
+            : 'render approval status is unknown',
+        );
+      }
+    } finally {
+      if (approvalLife.current === life && !life.signal.aborted) {
+        approvalLock.current = false;
+        setApprovalPending(false);
+      }
+    }
+  };
+  const pauseForReview = async () => {
+    if (approvalLock.current) return;
+    approvalLock.current = true;
+    setApprovalPending(true);
+    const life = approvalLife.current;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const done = () => {
+          clearTimeout(timer);
+          pauseObservers.current.delete(done);
+          if (!life || life.signal.aborted)
+            reject(new Error('review cancelled'));
+          else resolve();
+        };
+        const timer = setTimeout(() => {
+          pauseObservers.current.delete(done);
+          reject(
+            new Error(
+              'pause acknowledgement was not received; no render approval was sent',
+            ),
+          );
+        }, studioTiming.handshake);
+        pauseObservers.current.add(done);
+        try {
+          agentController.pause();
+        } catch (error) {
+          clearTimeout(timer);
+          pauseObservers.current.delete(done);
+          reject(error);
+        }
+      });
+      if (life && !life.signal.aborted) setReviewMode('review');
+    } catch (error) {
+      if (life && !life.signal.aborted) {
+        setReviewMode('closed');
+        setBoundary(
+          error instanceof Error ? error.message : 'pause status unknown',
+        );
+      }
+    } finally {
+      if (life && !life.signal.aborted) {
+        approvalLock.current = false;
+        setApprovalPending(false);
+      }
+    }
+  };
+  React.useEffect(() => {
+    if (
+      new URLSearchParams(window.location.search).get('review') === 'render' &&
+      (snapshot.status === 'editing' || snapshot.status === 'awaiting_review')
+    )
+      setReviewMode('review');
+  }, [sessionId, snapshot.status]);
+  const activeGroup = conversation.items.find(
+    (item) =>
+      item.kind === 'action-group' &&
+      !!state.activeAction &&
+      item.actionIds.includes(state.activeAction.id),
+  );
+  const currentGroupSummary =
+    activeGroup?.kind === 'action-group'
+      ? activeGroup.stoppedAdjusting
+        ? 'stopped here, adjusting'
+        : (conversation.actions[activeGroup.actionIds[0] ?? '']?.title ?? null)
+      : null;
+  const latestReview = [...conversation.items]
+    .reverse()
+    .find((item) => item.kind === 'review');
   const clipNames = Object.fromEntries(
     Object.values(project.clips).map((clip) => [
       clip.id,
@@ -1038,7 +1261,8 @@ export function StudioShell({
     onFocusComposer: () => {
       useStudio.setState({ agentCollapsed: false });
       setAgentTab('chat');
-      focusComposer();
+      setReviewComposer(true);
+      requestAnimationFrame(focusComposer);
     },
     onRender: finish,
     onSend: sendConversation,
@@ -1092,6 +1316,7 @@ export function StudioShell({
               ?.thumbUrl,
           }))}
           attachments={chatAttachments}
+          placeholder={reviewComposer ? 'what should kimo change?' : undefined}
           working={state.agent === 'acting'}
           stopped={state.agent === 'paused'}
           orangeOwner={
@@ -1103,6 +1328,7 @@ export function StudioShell({
           onEscape={focusTimeline}
           onSend={async (input) => {
             await agentController.send(input);
+            setReviewComposer(false);
             setChatAttachments([]);
           }}
           onPause={() => dispatchAgent('pause')}
@@ -1213,6 +1439,8 @@ export function StudioShell({
       aria-label="video studio"
     >
       <StudioTopBar
+        projectTitle={projectTitle}
+        onTitleChange={setProjectTitle}
         projectSave={editingState?.saveStatus}
         sessionId={sessionId}
         commands={{
@@ -1233,9 +1461,7 @@ export function StudioShell({
                   void editingSession?.redoUser();
                 }
               : undefined),
-          finish:
-            commands.finish ??
-            (() => setBoundary('review flow connects in Phase 9')),
+          finish,
         }}
         togglePanel={togglePanel}
         onLeave={() => router.push('/')}
@@ -1264,6 +1490,12 @@ export function StudioShell({
             assets={assets}
             slots={{
               ...slots,
+              reviewOverlay: (
+                <ReviewPrompt
+                  requestId={latestReview?.id ?? null}
+                  onWatch={presentation.onPlayFromStart}
+                />
+              ),
               viewer:
                 slots.viewer ??
                 (Object.keys(project.clips).length ? (
@@ -1328,6 +1560,35 @@ export function StudioShell({
           toggle={() => togglePanel('timeline')}
         />
       </div>
+      <ActingRenderDialog
+        open={reviewMode === 'acting'}
+        currentGroupSummary={currentGroupSummary}
+        pending={approvalPending}
+        ready={reviewReady}
+        onOpenChange={(open) => {
+          if (!open && !approvalPending) setReviewMode('closed');
+        }}
+        onRenderNow={() => {
+          void pauseForReview();
+        }}
+        onLetFinish={() => setReviewMode('closed')}
+      />
+      <ReviewDialog
+        open={reviewMode === 'review'}
+        project={project}
+        title={projectTitle}
+        ready={reviewReady && !approvalUnknown}
+        pending={approvalPending}
+        getFrame={captureReviewFrame}
+        onPoster={recordReviewPoster}
+        onOpenChange={(open) => {
+          if (!open && !approvalPending) setReviewMode('closed');
+        }}
+        onKeepEditing={() => setReviewMode('closed')}
+        onRender={(options) => {
+          void approveReview(options);
+        }}
+      />
       <ReplaceMediaDialog
         clipId={replacement?.clipId ?? null}
         mode={replacement?.mode ?? 'all'}
@@ -1362,6 +1623,44 @@ export function StudioShell({
           <DialogTitle>studio shell</DialogTitle>
           <DialogDescription>{boundary}</DialogDescription>
           <DialogActions>
+            {approvalUnknown ? (
+              <Button
+                variant="secondary"
+                disabled={approvalPending}
+                onClick={() => {
+                  if (approvalLock.current) return;
+                  const life = approvalLife.current;
+                  if (!life || life.signal.aborted) return;
+                  approvalLock.current = true;
+                  setApprovalPending(true);
+                  void reconcileApproval(
+                    api,
+                    sessionId,
+                    approvalUnknown.baselineRenderId,
+                  )
+                    .then((outcome) => {
+                      if (life.signal.aborted || approvalLife.current !== life)
+                        return;
+                      if (outcome.kind === 'accepted') {
+                        setApprovalUnknown(null);
+                        setBoundary('');
+                        navigateToRender(outcome.videoId);
+                      } else setBoundary(outcome.message);
+                    })
+                    .finally(() => {
+                      if (
+                        !life.signal.aborted &&
+                        approvalLife.current === life
+                      ) {
+                        approvalLock.current = false;
+                        setApprovalPending(false);
+                      }
+                    });
+                }}
+              >
+                check render status
+              </Button>
+            ) : null}
             <Button onClick={() => setBoundary('')}>close</Button>
           </DialogActions>
         </DialogContent>

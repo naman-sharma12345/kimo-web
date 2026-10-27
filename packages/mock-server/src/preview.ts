@@ -39,17 +39,17 @@ export function route(raw: string, method = 'GET') {
   const allowed = mock
     ? (read &&
         new RegExp(
-          `^/(health|fixtures/(clip-[123]\\.mp4|image\\.png|mask\\.png|identity-lut\\.png|music\\.wav)|v1/(sessions|renders|videos)/${id}|media/${id})$`,
+          `^/(health|fixtures/((?:clip-[123]|portrait|square)\\.mp4|frame-(?:landscape|portrait|square)\\.jpg|image\\.png|mask\\.png|identity-lut\\.png|music\\.wav)|v1/(sessions|renders|videos)/${id}|v1/renders/${id}/frame\\.jpg|media/${id})$`,
         ).test(target)) ||
       (method === 'POST' &&
         (['/v1/uploads', '/v1/sessions'].includes(target) ||
           new RegExp(
-            `^/v1/(uploads/${id}/complete|sessions/${id}/(ops|messages|approve))$`,
+            `^/v1/(uploads/${id}/complete|sessions/${id}/(ops|messages|approve|reopen)|renders/${id}/cancel)$`,
           ).test(target))) ||
       (method === 'PUT' && new RegExp(`^/mock-r2/${id}(/\\d+)?$`).test(target))
     : read &&
       (target === '/' ||
-        new RegExp(`^/(warmup|studio)/${id}$`).test(target) ||
+        new RegExp(`^/(warmup|studio|render|v)/${id}$`).test(target) ||
         /^\/_next\/static\/[a-zA-Z0-9_./[\]@()-]+$/.test(target) ||
         [
           '/grain.png',

@@ -1,0 +1,294 @@
+.scene {
+  min-height: 100dvh;
+  background: var(--ink-0);
+  color: var(--cream-100);
+  padding: var(--space-24);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-32);
+}
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.nav a {
+  color: var(--cream-100);
+  text-decoration: none;
+  font-size: var(--t-20);
+}
+.scene :focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.content {
+  width: min(100%, var(--render-frame-width));
+  margin: auto;
+  text-align: center;
+}
+.frame {
+  width: 100%;
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-12);
+  box-shadow: var(--viewer-frame);
+  background: var(--ink-1);
+  view-transition-name: kimo-viewer;
+  isolation: isolate;
+}
+.preview,
+.poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.poster {
+  opacity: 0.4;
+}
+.placeholder {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  min-height: var(--space-128);
+  color: var(--cream-38);
+}
+.scan {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  animation: sweep var(--render-sweep) linear both;
+  background: var(--render-unprinted);
+}
+.scan::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: var(--orange);
+}
+.scan::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(-1 * var(--render-sheen-height));
+  height: var(--render-sheen-height);
+  background: var(--render-sheen);
+}
+.scan[data-final] {
+  animation-duration: var(--render-final-sweep);
+}
+@keyframes sweep {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(100%);
+  }
+}
+.progress {
+  height: var(--space-4);
+  background: var(--ink-4);
+  border-radius: var(--r-pill);
+  margin-top: var(--space-24);
+  overflow: hidden;
+}
+.progress span {
+  display: block;
+  height: 100%;
+  background: var(--orange);
+  transition:
+    width var(--dur-3) var(--ease-out),
+    background var(--dur-3);
+}
+.scene[data-state='done'] .progress span {
+  background: var(--success);
+}
+.scene[data-state='failed'] .progress span {
+  background: var(--error);
+}
+.scene[data-state='failed'] .frame {
+  opacity: 0.4;
+}
+.numbers {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-12);
+  margin-top: var(--render-row-gap);
+  font: var(--t-12) / var(--leading-12) var(--font-mono);
+}
+.numbers span:last-child {
+  color: var(--cream-38);
+}
+.stage,
+.failure {
+  margin-top: var(--space-32);
+  font-size: var(--t-15);
+}
+.failure p {
+  font: var(--t-12) / var(--leading-12) var(--font-mono);
+  color: var(--cream-38);
+  margin: var(--space-12);
+  overflow-wrap: anywhere;
+}
+.failure button {
+  margin: var(--space-4);
+}
+.filmstrip {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-4);
+  margin-top: var(--space-12);
+  overflow: hidden;
+}
+.filmstrip img {
+  width: var(--render-tile-width);
+  height: var(--render-tile-height);
+  border-radius: var(--r-4);
+  object-fit: cover;
+  min-width: 0;
+}
+.disclosure,
+.footer {
+  color: var(--cream-38);
+  font-size: var(--t-12);
+  line-height: var(--leading-12);
+}
+.disclosure {
+  margin-top: var(--space-16);
+}
+.footer {
+  text-align: center;
+  display: grid;
+  justify-items: center;
+  gap: var(--space-8);
+}
+.completion {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+.bars {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-end;
+}
+.bars i {
+  display: block;
+  width: var(--space-4);
+  height: var(--space-24);
+  border-radius: var(--r-pill);
+  background: var(--cream-100);
+}
+.bars i:nth-child(2) {
+  height: var(--space-40);
+}
+.bars i:nth-child(3) {
+  height: var(--space-32);
+}
+.bars i:nth-child(4) {
+  height: var(--space-20);
+}
+.check {
+  position: absolute;
+  width: var(--space-20);
+  height: var(--space-20);
+  color: var(--success);
+  stroke-dasharray: 48;
+  animation: check var(--render-completion) var(--ease-out) both;
+}
+@keyframes check {
+  0%,
+  55% {
+    opacity: 0;
+    stroke-dashoffset: 48;
+  }
+  80%,
+  100% {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}
+.scene[data-state='done'] .frame {
+  animation: lift var(--render-completion) var(--ease-out) both;
+}
+@keyframes lift {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  60% {
+    transform: scale(1.03);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scan,
+  .bars {
+    display: none;
+  }
+  .scene[data-state='done'] .frame {
+    animation: none;
+  }
+  .check {
+    animation: none;
+  }
+  .preview {
+    transition: opacity var(--dur-2);
+  }
+}
+
+.bars {
+  animation: collapse var(--render-completion) var(--ease-out) both;
+}
+@keyframes collapse {
+  0%,
+  45% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  65%,
+  100% {
+    transform: scale(0);
+    opacity: 0;
+  }
+}
+.nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+.nav img {
+  width: var(--space-20);
+  height: var(--space-20);
+}
+.content {
+  position: relative;
+  isolation: isolate;
+}
+.grain {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: url('/grain.png');
+  opacity: var(--phase9-grain-opacity);
+  mix-blend-mode: overlay;
+  z-index: 10;
+}
+.horizon {
+  position: absolute;
+  pointer-events: none;
+  z-index: -1;
+  width: var(--phase9-glow-width);
+  height: var(--phase9-glow-height);
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--phase9-horizon);
+  filter: blur(var(--phase9-glow-blur));
+  opacity: 0.6;
+}

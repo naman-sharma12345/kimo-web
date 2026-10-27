@@ -25,6 +25,7 @@ import { useViewerTransform } from './viewer-transform';
 import type { EditingAPI } from '@/lib/editing/types';
 import { ViewerTextLayer } from './viewer-text-layer';
 export interface StudioCompositorHandle {
+  getFrame?: CompositorController['getFrame'];
   getFilmstrip?: CompositorController['getFilmstrip'];
   getWaveform?: CompositorController['getWaveform'];
   getAudioLevel?: CompositorController['getAudioLevel'];
@@ -247,6 +248,7 @@ export function StudioCompositor({
         bridgeRef.current = {
           event: (event) => current.event(event),
           assets: (next) => current.setAssets(next),
+          getFrame: current.getFrame?.bind(current),
           getFilmstrip: current.getFilmstrip.bind(current),
           getWaveform: current.getWaveform.bind(current),
           getAudioLevel: current.getAudioLevel?.bind(current),

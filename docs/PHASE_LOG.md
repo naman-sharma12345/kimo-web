@@ -275,3 +275,23 @@ lint, strict TypeScript, 825 tests in 77 files and production build. All 365 sou
 paths remained unchanged throughout that run. A final foreground replay regression
 was added after this run; final publication requires rerunning the sequence on
 that settled source. The visual acceptance checklist remains open.
+
+### Verified Phase 8 publication
+
+The settled source passed lint, strict TypeScript, 826 tests in 77 files and production build, all 365 paths unchanged. Commit b67f1863846ed6b565d3b4fdd8e725d0b48e14e1 contains 362 verified public files, 52 upserts and no deletions/mode changes. Visual/production acceptance remains open.
+
+## Phase 9 integration in progress, 2026-10-27
+
+Typed approval options, actual job/video identities, frame/cancel/reopen contracts and exact preview routes are implemented. Actual JPEG and aspect-correct silent MP4 fixture bytes are tested; these remain synthetic proposals, not production agreement.
+
+Review/poster validation passed 341 tests in 11 files. Contract/mock validation passed 41 scoped tests. Parent review/approval validation passed 23 tests, including actual-title approval, pause status ordering and unknown-delivery protection. These suites overlap and must not be summed into a repository count. Render/delivery integration and final sequential gates remain pending.
+
+- [ ] Review triggers, acting confirmation, composition poster and summary visually verified.
+- [ ] Server-observed progress, frame changes, chunk sheen, filmstrip and cancel verified in browser.
+- [ ] Completion transition and reduced-motion behavior verified in browser.
+- [ ] Custom player, download filename, copy/share, authorized edit-again and metadata verified.
+- [ ] Actual portrait media and 9:16 delivery visually verified.
+- [ ] Render failure and explicit reviewed retry verified in browser.
+- [ ] Genuine full approve-to-render-to-delivery recordings captured and inspected.
+
+No GPU pixels, production composition/audio/captions, native sharing, public edit authorization, durable service or final deployment acceptance is inferred from source tests. Phase 10 remains outstanding. No authoritative production REST/WS deployment has yet been located; final contracts require that service, not a guessed marketing/MCP endpoint.

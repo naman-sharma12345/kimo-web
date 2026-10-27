@@ -1,0 +1,72 @@
+.prompt {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-8);
+  color: var(--cream-100);
+  font-size: var(--t-13);
+  line-height: var(--leading-13);
+  pointer-events: none;
+  opacity: 1;
+  transition:
+    opacity var(--dur-3) var(--ease-out),
+    visibility var(--dur-3) var(--ease-out);
+}
+.prompt[data-visible='false'] {
+  opacity: 0;
+  visibility: hidden;
+}
+.prompt > span {
+  pointer-events: auto;
+}
+.play {
+  pointer-events: auto;
+  width: var(--review-play-size, calc(var(--space-48) + var(--space-8)));
+  height: var(--review-play-size, calc(var(--space-48) + var(--space-8)));
+  border-radius: 50%;
+  padding: 0;
+}
+.play > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.play:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+.poster {
+  aspect-ratio: 16 / 9;
+  border-radius: var(--r-8);
+  overflow: hidden;
+  background: var(--ink-0);
+  color: var(--cream-38);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--t-13);
+  line-height: var(--leading-13);
+}
+.poster img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.summary {
+  margin-block: var(--space-16);
+  font-variant-numeric: tabular-nums;
+}
+/* Preserve one orange action: caption state uses cream, not the global orange switch. */
+.captionToggle[data-state='checked'] {
+  background: var(--cream-100);
+}
+.captionToggle[data-state='checked'] > span {
+  background: var(--ink-0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .prompt {
+    transition-duration: var(--dur-2);
+  }
+}

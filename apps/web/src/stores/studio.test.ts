@@ -100,3 +100,14 @@ it('does not let a replayed historical start replace the current foreground', ()
   receive(first);
   expect(useStudio.getState().activeAction?.id).toBe('current');
 });
+
+it('keeps the explicit synthetic pause status resumable without inventing a wire paused enum', () => {
+  useStudio
+    .getState()
+    .receive({ t: 'agent.status', state: 'idle', label: 'paused' });
+  expect(useStudio.getState().agent).toBe('paused');
+  useStudio
+    .getState()
+    .receive({ t: 'agent.status', state: 'thinking', label: 'planning' });
+  expect(useStudio.getState().agent).toBe('thinking');
+});

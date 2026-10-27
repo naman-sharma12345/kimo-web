@@ -22,6 +22,10 @@ import { randomUUID } from 'node:crypto';
 import { mediaResponse } from './media-response';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
+  approvalOptionsSchema,
+  type ApprovalOptions,
+  type Render,
+  type Video,
   applyOps,
   uploadRequestSchema,
   completeRequestSchema,
@@ -47,6 +51,8 @@ export function createMockServer(
     partSize?: number;
     /** Synthetic test hold in real milliseconds, bounded for interrupt ACK. */
     stepDurationMs?: number;
+    /** Synthetic edit lifetime, milliseconds. */
+    editTtlMs?: number;
   } = {},
 ) {
   const port = options.port ?? Number(process.env.PORT ?? 8787);
@@ -94,7 +100,55 @@ export function createMockServer(
   }
   const uploads = new Map<string, Uploaded>();
   const sessions = new Map<string, Session>();
-  const renders = new Map<string, { sessionId: string; started: number }>();
+  interface Job {
+    sessionId: string;
+    started: number;
+    version: number;
+    input: ApprovalOptions;
+    state: Render;
+    video: Video;
+    videoId: string;
+    timer?: ReturnType<typeof setTimeout>;
+  }
+  const renders = new Map<string, Job>();
+  const videos = new Map<string, Video>();
+  function updateRender(id: string, job: Job) {
+    if (job.state.status !== 'rendering') return;
+    const session = sessions.get(job.sessionId);
+    if (
+      !session ||
+      session.snapshot.renderId !== id ||
+      session.snapshot.status !== 'rendering'
+    )
+      return;
+    const progress = Math.min(1, (Date.now() - job.started) / (25000 / speed));
+    job.state.progress = progress;
+    job.state.frame = Math.floor(progress * 240);
+    job.state.chunkIndex = Math.floor(job.state.frame / 30);
+    job.state.etaSec = Math.ceil(((1 - progress) * 25) / speed);
+    if (progress === 1) {
+      if (job.timer) clearTimeout(job.timer);
+      job.state.status = fail === 'render' ? 'failed' : 'done';
+      session.snapshot.status = job.state.status;
+      if (fail === 'render')
+        job.state.error = { message: 'simulated synthetic render failure' };
+      else {
+        job.state.videoId = job.videoId;
+        session.snapshot.videoId = job.videoId;
+        videos.set(job.videoId, job.video);
+      }
+    }
+  }
+  const emptyBody = (value: unknown) => {
+    // Cancel and reopen accept only an empty JSON object.
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      Array.isArray(value) ||
+      Object.keys(value).length
+    )
+      throw new Error('expected empty object');
+  };
   const emit = (s: Session, event: ServerEvent) => {
     if (event.t === 'agent.action.start') {
       const actionIds = (s.snapshot.actionIds ??= []);
@@ -279,7 +333,13 @@ export function createMockServer(
     };
   }
   function script(s: Session) {
-    if (s.started) return;
+    if (
+      s.started ||
+      s.snapshot.status === 'rendering' ||
+      s.snapshot.status === 'done' ||
+      s.snapshot.status === 'failed'
+    )
+      return;
     if (
       s.snapshot.assets.some(
         (asset) => uploads.has(asset.id) && !uploads.get(asset.id)?.complete,
@@ -667,28 +727,38 @@ export function createMockServer(
   const server = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,ETag');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,POST,PUT,OPTIONS');
     res.setHeader('Access-Control-Expose-Headers', 'ETag');
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
       return;
     }
-    const path = new URL(req.url ?? '/', base).pathname;
+    const url = new URL(req.url ?? '/', base);
+    const path = url.pathname;
     const segments = path.split('/');
     try {
       if (path === '/health') {
         json(res, 200, { ok: true });
         return;
       }
-      if (path.startsWith('/fixtures/')) {
+      if (
+        path.startsWith('/fixtures/') &&
+        (req.method === 'GET' || req.method === 'HEAD')
+      ) {
         const name = segments[2];
         if (
+          segments.length !== 3 ||
           !name ||
           ![
             'clip-1.mp4',
             'clip-2.mp4',
             'clip-3.mp4',
+            'portrait.mp4',
+            'square.mp4',
+            'frame-landscape.jpg',
+            'frame-portrait.jpg',
+            'frame-square.jpg',
             'music.wav',
             'image.png',
             'mask.png',
@@ -709,7 +779,9 @@ export function createMockServer(
             ? 'video/mp4'
             : name.endsWith('.png')
               ? 'image/png'
-              : 'audio/wav',
+              : name.endsWith('.jpg')
+                ? 'image/jpeg'
+                : 'audio/wav',
         );
         await mediaResponse(req, res, file);
         return;
@@ -905,6 +977,9 @@ export function createMockServer(
           snapshot: {
             status: 'warming',
             actionIds: [],
+            editExpiresAt: new Date(
+              Date.now() + (options.editTtlMs ?? 86400000),
+            ).toISOString(),
             project: project(id, input.aspect === '9:16'),
             assets: input.assetIds.flatMap((id) => {
               const upload = uploads.get(id);
@@ -932,8 +1007,48 @@ export function createMockServer(
           json(res, 404, { error: 'unknown session' });
           return;
         }
-        if (segments.length === 4 && req.method === 'GET') {
+        if (
+          segments.length === 4 &&
+          (req.method === 'GET' || req.method === 'HEAD')
+        ) {
+          const jobId = s.snapshot.renderId;
+          const job = jobId ? renders.get(jobId) : undefined;
+          if (jobId && job) updateRender(jobId, job);
           json(res, 200, s.snapshot);
+          return;
+        }
+        if (segments.length !== 5) {
+          json(res, 404, { error: 'not found' });
+          return;
+        }
+        if (
+          s.snapshot.status === 'rendering' &&
+          (segments[4] === 'ops' || segments[4] === 'messages')
+        ) {
+          json(res, 409, { error: 'render cut is frozen' });
+          return;
+        }
+        if (segments[4] === 'reopen' && req.method === 'POST') {
+          emptyBody(await body(req));
+          if (
+            s.snapshot.editExpiresAt &&
+            Date.parse(s.snapshot.editExpiresAt) <= Date.now()
+          ) {
+            json(res, 410, { error: 'edit expired' });
+            return;
+          }
+          const jobId = s.snapshot.renderId;
+          const job = jobId ? renders.get(jobId) : undefined;
+          if (jobId && job) updateRender(jobId, job);
+          if (
+            !job ||
+            !['done', 'failed', 'cancelled'].includes(job.state.status)
+          ) {
+            json(res, 409, { error: 'no terminal render' });
+            return;
+          }
+          s.snapshot.status = 'editing';
+          json(res, 200, { status: 'editing' });
           return;
         }
         if (segments[4] === 'ops' && req.method === 'POST') {
@@ -968,71 +1083,193 @@ export function createMockServer(
           return;
         }
         if (segments[4] === 'approve' && req.method === 'POST') {
+          const input = approvalOptionsSchema.parse(await body(req));
+          if (
+            input.expectedProjectVersion !== undefined &&
+            input.expectedProjectVersion !== s.snapshot.project.version
+          ) {
+            json(res, 409, { error: 'version conflict' });
+            return;
+          }
+          const previousId = s.snapshot.renderId;
+          const previous = previousId ? renders.get(previousId) : undefined;
+          if (previous && previousId) updateRender(previousId, previous);
+          if (previous?.state.status === 'rendering') {
+            const same =
+              previous.version === s.snapshot.project.version &&
+              previous.input.title === input.title &&
+              previous.input.preset === input.preset &&
+              previous.input.burnInCaptions === input.burnInCaptions &&
+              previous.input.expectedProjectVersion ===
+                input.expectedProjectVersion;
+            if (!same) {
+              json(res, 409, { error: 'active render options conflict' });
+              return;
+            }
+            json(res, 200, { renderId: previousId });
+            return;
+          }
+          if (
+            s.snapshot.editExpiresAt &&
+            Date.parse(s.snapshot.editExpiresAt) <= Date.now()
+          ) {
+            json(res, 410, { error: 'edit expired' });
+            return;
+          }
+          const aspect =
+            s.snapshot.project.width === s.snapshot.project.height
+              ? 'square'
+              : s.snapshot.project.width < s.snapshot.project.height
+                ? 'portrait'
+                : 'landscape';
+          const filename =
+            aspect === 'landscape' ? 'clip-1.mp4' : `${aspect}.mp4`;
+          const file = resolve(fixtureDir, filename);
+          if (!existsSync(file)) {
+            json(res, 503, { error: 'synthetic delivery fixture unavailable' });
+            return;
+          }
+          // Atomic synchronous fence: stop held work and invalidate delayed plans before capture.
+          s.paused = true;
+          s.planEpoch++;
+          s.clock.pause();
+          s.runner.pause();
           const renderId = randomUUID();
+          const videoId = randomUUID();
+          const title =
+            input.title ??
+            s.snapshot.title ??
+            'mock preview only, not an engine render';
+          s.snapshot.title = title;
           s.snapshot.status = 'rendering';
           s.snapshot.renderId = renderId;
-          later(s, 25000, () => {
-            s.snapshot.status = fail === 'render' ? 'failed' : 'done';
-            if (fail !== 'render') s.snapshot.videoId = id;
-          });
-          renders.set(renderId, { sessionId: id, started: Date.now() });
+          delete s.snapshot.videoId;
+          const job: Job = {
+            sessionId: id,
+            started: Date.now(),
+            version: s.snapshot.project.version,
+            input,
+            videoId,
+            state: {
+              status: 'rendering',
+              sessionId: id,
+              progress: 0,
+              frame: 0,
+              totalFrames: 240,
+              etaSec: Math.ceil(25 / speed),
+              fps: 30,
+              chunkIndex: 0,
+            },
+            video: {
+              url: `${base}/fixtures/${filename}`,
+              posterUrl: `${base}/fixtures/frame-${aspect}.jpg`,
+              durationSec: 8,
+              width:
+                aspect === 'portrait'
+                  ? 1080
+                  : aspect === 'square'
+                    ? 1080
+                    : 1920,
+              height:
+                aspect === 'landscape'
+                  ? 1080
+                  : aspect === 'square'
+                    ? 1080
+                    : 1920,
+              sizeBytes: statSync(file).size,
+              title,
+              sessionId: id,
+              editExpiresAt: s.snapshot.editExpiresAt,
+            },
+          };
+          renders.set(renderId, job);
+          job.timer = setTimeout(
+            () => updateRender(renderId, job),
+            Math.ceil(25000 / speed),
+          );
           json(res, 200, { renderId });
           return;
         }
       }
-      if (segments[2] === 'renders' && req.method === 'GET') {
-        const render = renders.get(segments[3] ?? '');
-        if (!render) {
+      if (segments[1] === 'v1' && segments[2] === 'renders') {
+        const renderId = segments[3] ?? '';
+        const job = renders.get(renderId);
+        if (!job) {
           json(res, 404, { error: 'unknown render' });
           return;
         }
-        const progress = Math.min(
-          1,
-          (Date.now() - render.started) / (25000 / speed),
-        );
-        const s = sessions.get(render.sessionId);
-        if (!s) {
-          json(res, 404, { error: 'unknown session' });
+        updateRender(renderId, job);
+        if (
+          segments.length === 5 &&
+          segments[4] === 'cancel' &&
+          req.method === 'POST'
+        ) {
+          emptyBody(await body(req));
+          if (
+            job.state.status !== 'rendering' &&
+            job.state.status !== 'cancelled'
+          ) {
+            json(res, 409, { error: 'render already terminal' });
+            return;
+          }
+          if (job.state.status !== 'cancelled') {
+            job.state.status = 'cancelled';
+            if (job.timer) clearTimeout(job.timer);
+            const session = sessions.get(job.sessionId);
+            if (session?.snapshot.renderId === renderId)
+              session.snapshot.status = 'editing';
+          }
+          json(res, 200, { status: 'cancelled', sessionId: job.sessionId });
           return;
         }
-        if (progress === 1) {
-          s.snapshot.status = fail === 'render' ? 'failed' : 'done';
-          if (fail !== 'render') s.snapshot.videoId = render.sessionId;
+        const read = req.method === 'GET' || req.method === 'HEAD';
+        if (segments.length === 4 && read) {
+          json(res, 200, job.state);
+          return;
         }
-        json(res, 200, {
-          status:
-            fail === 'render'
-              ? 'failed'
-              : progress === 1
-                ? 'done'
-                : 'rendering',
-          progress,
-          frame: Math.floor(progress * 630),
-          totalFrames: 630,
-          etaSec: Math.ceil(((1 - progress) * 25) / speed),
-          ...(progress === 1 && fail !== 'render'
-            ? { videoId: render.sessionId }
-            : {}),
-        });
-        return;
+        if (segments.length === 5 && segments[4] === 'frame.jpg' && read) {
+          const ns = url.searchParams.getAll('n');
+          const n = Number(ns[0]);
+          if (
+            ns.length !== 1 ||
+            !/^(0|[1-9][0-9]*)$/.test(ns[0] ?? '') ||
+            !Number.isSafeInteger(n)
+          ) {
+            json(res, 400, { error: 'invalid frame' });
+            return;
+          }
+          if (job.state.frame === 0 || n > job.state.frame) {
+            json(res, 404, { error: 'frame unavailable' });
+            return;
+          }
+          const filename =
+            new URL(job.video.posterUrl).pathname.split('/').pop() ?? '';
+          const file = resolve(fixtureDir, filename);
+          if (!existsSync(file)) {
+            json(res, 404, { error: 'synthetic JPEG unavailable' });
+            return;
+          }
+          const bytes = readFileSync(file);
+          if (bytes[0] !== 255 || bytes[1] !== 216 || bytes[2] !== 255)
+            throw new Error('invalid JPEG fixture');
+          res.setHeader('Content-Type', 'image/jpeg');
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          await mediaResponse(req, res, file);
+          return;
+        }
       }
-      if (segments[2] === 'videos' && req.method === 'GET') {
-        const s = sessions.get(segments[3] ?? '');
-        if (!s || s.snapshot.status !== 'done') {
+      if (
+        segments[1] === 'v1' &&
+        segments[2] === 'videos' &&
+        segments.length === 4 &&
+        (req.method === 'GET' || req.method === 'HEAD')
+      ) {
+        const video = videos.get(segments[3] ?? '');
+        if (!video) {
           json(res, 404, { error: 'unknown video' });
           return;
         }
-        json(res, 200, {
-          url: `${base}/fixtures/clip-1.mp4`,
-          posterUrl: `${base}/fixtures/image.png`,
-          durationSec: 8,
-          width: 1920,
-          height: 1080,
-          sizeBytes: existsSync(resolve(fixtureDir, 'clip-1.mp4'))
-            ? readFileSync(resolve(fixtureDir, 'clip-1.mp4')).length
-            : 0,
-          title: 'mock preview only, not an engine render',
-        });
+        json(res, 200, video);
         return;
       }
       json(res, 404, { error: 'not found' });
@@ -1043,6 +1280,12 @@ export function createMockServer(
     }
   });
   function interrupt(s: Session, text: string, clientMessageId?: string) {
+    if (
+      s.snapshot.status === 'rendering' ||
+      s.snapshot.status === 'done' ||
+      s.snapshot.status === 'failed'
+    )
+      return;
     s.planEpoch++;
     s.runner.afterCurrent(() => {
       emit(s, {
@@ -1145,7 +1388,13 @@ export function createMockServer(
           s.runner.pause();
           emit(s, { t: 'agent.status', state: 'idle', label: 'paused' });
         }
-        if (event.t === 'resume' && s.paused) {
+        if (
+          event.t === 'resume' &&
+          s.paused &&
+          s.snapshot.status !== 'rendering' &&
+          s.snapshot.status !== 'done' &&
+          s.snapshot.status !== 'failed'
+        ) {
           s.paused = false;
           s.clock.resume();
           s.runner.resume();
@@ -1179,6 +1428,8 @@ export function createMockServer(
       return base;
     },
     async close() {
+      for (const job of renders.values())
+        if (job.timer) clearTimeout(job.timer);
       for (const s of sessions.values()) {
         s.runner.dispose();
         s.clock.dispose();

@@ -28,6 +28,7 @@ export type AgentComposerProps = {
   onRender: () => void | Promise<void>;
   onStatus?: (message: string) => void;
   working?: boolean;
+  placeholder?: string;
   stopped?: boolean;
   disabled?: boolean;
   orangeOwner?: 'composer' | 'other' | 'none';
@@ -50,6 +51,7 @@ export const AgentComposer = forwardRef<
     onRender,
     onStatus,
     working = false,
+    placeholder,
     stopped = false,
     disabled = false,
     orangeOwner = 'none',
@@ -172,11 +174,12 @@ export const AgentComposer = forwardRef<
         clips={clips}
         disabled={disabled}
         placeholder={
-          stopped
+          placeholder ??
+          (stopped
             ? 'tell kimo what to do next…'
             : working
               ? 'type to interrupt kimo…'
-              : 'tell kimo what to change…'
+              : 'tell kimo what to change…')
         }
         onChange={(value) => {
           segments.current = value;

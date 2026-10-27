@@ -752,3 +752,170 @@ it('exposes currentScene as the last submitted unfiltered metadata while text is
   expect(s.controller.currentScene?.layers[0]?.text?.content).toBe('hello');
   s.controller.dispose();
 });
+
+describe('review poster transaction (mock renderer, not GPU acceptance)', () => {
+  const frame = () => ({
+    submitted: true,
+    retained: false,
+    approximations: [{ clipId: 'a', reason: 'preview approximation' }],
+    frame: {
+      blob: new Blob(['pixels'], { type: 'image/png' }),
+      width: 1280,
+      height: 720,
+    },
+  });
+  it('requests prepared submission at one second, returns actual revision/dimensions and restores owned transport', async () => {
+    const s = await setup({ render: async () => frame() });
+    s.controller.updateProject({ ...project, version: 7 });
+    s.controller.setTransport({ ...transport, playing: true }, 4);
+    const before = s.playback.mock.calls.length;
+    const pending = s.controller.getFrame(1);
+    await s.step(0);
+    const result = await pending;
+    expect(result).toMatchObject({
+      time: 1,
+      projectVersion: 7,
+      width: 1280,
+      height: 720,
+      approximations: ['preview approximation'],
+    });
+    expect(s.renderer.render).toHaveBeenCalledWith(
+      expect.objectContaining({ time: 1 }),
+      { capture: true, signal: undefined },
+    );
+    expect(s.controller.currentTime).toBe(4);
+    expect(s.playback.mock.calls.slice(before)).not.toContainEqual([
+      1,
+      false,
+      expect.anything(),
+    ]);
+    s.controller.dispose();
+  });
+  it('clamps short projects to the last playable sample', async () => {
+    const s = await setup({ render: async () => frame() });
+    s.controller.updateProject({ ...project, duration: 0.5 });
+    const pending = s.controller.getFrame(1);
+    await s.step(0);
+    expect((await pending).time).toBeCloseTo(0.5 - 1 / 30);
+    s.controller.dispose();
+  });
+  it.each([
+    { submitted: false, retained: true, approximations: [] },
+    { submitted: true, retained: false, approximations: [] },
+  ])(
+    'rejects retained or uncaptured frames instead of using source thumbnails',
+    async (rendered) => {
+      const s = await setup({ render: async () => rendered });
+      const pending = expect(s.controller.getFrame(1)).rejects.toThrow(
+        'submitted composition',
+      );
+      await s.step(0);
+      await pending;
+      s.controller.dispose();
+    },
+  );
+  it('does not restore over a user seek', async () => {
+    const s = await setup({ render: async () => frame() });
+    const pending = expect(s.controller.getFrame(1)).rejects.toThrow(
+      'invalidated',
+    );
+    s.controller.seek(6);
+    await pending;
+    expect(s.controller.currentTime).toBe(6);
+    s.controller.dispose();
+  });
+  it('rejects changed project version without restoring the obsolete timeline', async () => {
+    const s = await setup();
+    const pending = expect(s.controller.getFrame(1)).rejects.toThrow(
+      'invalidated',
+    );
+    s.controller.updateProject({ ...project, version: 1 });
+    await pending;
+    expect(s.controller.currentTime).toBe(1);
+    s.controller.dispose();
+  });
+  it('aborts and restores still-owned prior time', async () => {
+    const s = await setup();
+    s.controller.seek(5);
+    const abort = new AbortController();
+    const pending = expect(
+      s.controller.getFrame(1, { signal: abort.signal }),
+    ).rejects.toThrow('aborted');
+    abort.abort();
+    await pending;
+    expect(s.controller.currentTime).toBe(5);
+    s.controller.dispose();
+  });
+  it('rejects disposal, uninitialized, already aborted, empty project and active text suppression', async () => {
+    const s = await setup();
+    s.controller.setEditingTextClip('a');
+    await expect(s.controller.getFrame(1)).rejects.toThrow('text editing');
+    s.controller.setEditingTextClip(null);
+    await expect(
+      s.controller.getFrame(1, { signal: AbortSignal.abort() }),
+    ).rejects.toThrow('aborted');
+    s.controller.updateProject({ ...project, duration: 0 });
+    await expect(s.controller.getFrame(1)).rejects.toThrow('playable');
+    s.controller.updateProject(project);
+    const pending = expect(s.controller.getFrame(1)).rejects.toThrow(
+      'disposed',
+    );
+    s.controller.dispose();
+    await pending;
+    await expect(s.controller.getFrame(1)).rejects.toThrow('not ready');
+  });
+  it('propagates readback/taint errors and rejects concurrent capture', async () => {
+    const s = await setup({
+      render: async () => {
+        throw new DOMException('tainted', 'SecurityError');
+      },
+    });
+    const pending = expect(s.controller.getFrame(1)).rejects.toThrow('tainted');
+    await expect(s.controller.getFrame(1)).rejects.toThrow('already active');
+    await s.step(0);
+    await pending;
+    s.controller.dispose();
+  });
+});
+
+describe('poster late intent guards', () => {
+  it('rejects agent follow intent and does not restore over it', async () => {
+    const s = await setup();
+    s.controller.seek(4);
+    const pending = expect(s.controller.getFrame(1)).rejects.toThrow(
+      'follow intent',
+    );
+    s.controller.event(action('new-target', 8));
+    await pending;
+    await s.step(240);
+    expect(s.controller.currentTime).toBe(8);
+    s.controller.dispose();
+  });
+  it('rejects version changes during readback and ignores late bytes', async () => {
+    let resolve: ((result: RenderResult) => void) | undefined;
+    const s = await setup({
+      render: () =>
+        new Promise<RenderResult>((done) => {
+          resolve = done;
+        }),
+    });
+    const pending = expect(s.controller.getFrame(1)).rejects.toThrow(
+      'invalidated',
+    );
+    await s.step(0);
+    expect(resolve).toBeDefined();
+    s.controller.updateProject({ ...project, version: 2 });
+    resolve?.({
+      submitted: true,
+      retained: false,
+      approximations: [],
+      frame: {
+        blob: new Blob(['stale'], { type: 'image/png' }),
+        width: 1280,
+        height: 720,
+      },
+    });
+    await pending;
+    s.controller.dispose();
+  });
+});

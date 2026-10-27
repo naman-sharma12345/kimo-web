@@ -14,6 +14,7 @@ interface AppHarness {
   stage: Container;
   renderer: {
     resize: ReturnType<typeof vi.fn>;
+    extract: { canvas: ReturnType<typeof vi.fn> };
     background: { color: unknown; alpha: number };
   };
   init: ReturnType<typeof vi.fn>;
@@ -72,6 +73,14 @@ vi.mock('pixi.js', async (original) => {
       stage = new pixi.Container();
       renderer = {
         resize: vi.fn(),
+        extract: {
+          canvas: vi.fn(() => ({
+            width: 1280,
+            height: 720,
+            convertToBlob: async () =>
+              new Blob(['readback'], { type: 'image/png' }),
+          })),
+        },
         background: { color: 0 as unknown, alpha: 1 },
       };
       init = vi.fn(async (options: ApplicationOptions) => {
@@ -1354,4 +1363,129 @@ it('keeps legacy combined-bound assignments compatible and exposes uppercase plu
   )?.primary.style;
   expect(style?.textTransform).toBe('none');
   expect(style?.WebkitTextStroke).toBe('2px rgba(0, 0, 0, 0.25)');
+});
+
+describe('poster extraction (source-level mock, not GPU pixel acceptance)', () => {
+  it('extracts the submitted prepared tree on the same renderer with explicit frame/background/resolution', async () => {
+    const r = await renderer();
+    const composition = {
+      ...scene([layer()]),
+      background: [0.1, 0.2, 0.3, 1] as [number, number, number, number],
+    };
+    const result = await r.render(composition, { capture: true });
+    expect(result).toMatchObject({
+      submitted: true,
+      retained: false,
+      frame: { width: 1280, height: 720 },
+    });
+    expect(result.frame?.blob.type).toBe('image/png');
+    expect(app().render).toHaveBeenCalledOnce();
+    expect(app().renderer.extract.canvas).toHaveBeenCalledWith({
+      target: root(),
+      frame: expect.objectContaining({ x: 0, y: 0, width: 1920, height: 1080 }),
+      resolution: 2 / 3,
+      clearColor: composition.background,
+    });
+    expect(app().render.mock.invocationCallOrder[0]).toBeLessThan(
+      app().renderer.extract.canvas.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(harness.apps).toHaveLength(1);
+    r.destroy();
+  });
+  it('rejects missing initial resources, retained frames, missing font, abort and taint rather than exporting a substitute', async () => {
+    const empty = await renderer(() => undefined);
+    await expect(
+      empty.render(scene([layer()]), { capture: true }),
+    ).rejects.toThrow('not ready');
+    expect(app().renderer.extract.canvas).not.toHaveBeenCalled();
+    empty.destroy();
+    const r = await renderer();
+    await r.render(scene([layer()]));
+    app().renderer.extract.canvas.mockImplementationOnce(() => {
+      throw new DOMException('tainted', 'SecurityError');
+    });
+    await expect(r.render(scene([layer()]), { capture: true })).rejects.toThrow(
+      'tainted',
+    );
+    await expect(
+      r.render(scene([layer()]), {
+        capture: true,
+        signal: AbortSignal.abort(),
+      }),
+    ).rejects.toThrow('aborted');
+    r.destroy();
+    const fonts = await renderer(
+      () => lease(),
+      async () => false,
+    );
+    const text = layer('title', 'text');
+    text.assetId = undefined;
+    text.text = resolveText(
+      { content: 'actual title', style: 'title-serif' },
+      0,
+      1920,
+      1080,
+    );
+    await expect(
+      fonts.render(scene([text]), { capture: true }),
+    ).rejects.toThrow('not ready');
+    expect(app().renderer.extract.canvas).not.toHaveBeenCalled();
+    fonts.destroy();
+  });
+  it('rejects disposal or renderer revision races during asynchronous encoding', async () => {
+    const r = await renderer();
+    let resolve: ((blob: Blob) => void) | undefined;
+    app().renderer.extract.canvas.mockReturnValueOnce({
+      width: 1280,
+      height: 720,
+      convertToBlob: () =>
+        new Promise<Blob>((done) => {
+          resolve = done;
+        }),
+    });
+    const result = expect(
+      r.render(scene([layer()]), { capture: true }),
+    ).rejects.toThrow('invalidated');
+    for (let i = 0; i < 10 && !resolve; i++) await Promise.resolve();
+    expect(resolve).toBeDefined();
+    r.cancelPending();
+    await result; // Cancellation does not wait for the abandoned encoder.
+    resolve?.(new Blob(['pixels'], { type: 'image/png' }));
+    r.destroy();
+  });
+});
+
+describe('poster font preparation cancellation', () => {
+  it('releases capture promptly without waiting for a pending font or submitting a fallback', async () => {
+    let loaded: ((ready: boolean) => void) | undefined;
+    const r = await renderer(
+      () => lease(),
+      () =>
+        new Promise<boolean>((resolve) => {
+          loaded = resolve;
+        }),
+    );
+    const title = layer('title', 'text');
+    title.assetId = undefined;
+    title.text = resolveText(
+      { content: 'actual title', style: 'title-serif' },
+      0,
+      1920,
+      1080,
+    );
+    const abort = new AbortController();
+    const result = expect(
+      r.render(scene([title]), { capture: true, signal: abort.signal }),
+    ).rejects.toThrow('font preparation');
+    for (let i = 0; i < 10 && !loaded; i++) await Promise.resolve();
+    expect(loaded).toBeDefined();
+    abort.abort();
+    await result;
+    expect(app().render).not.toHaveBeenCalled();
+    expect(app().renderer.extract.canvas).not.toHaveBeenCalled();
+    loaded?.(true);
+    await Promise.resolve();
+    expect(app().render).not.toHaveBeenCalled();
+    r.destroy();
+  });
 });

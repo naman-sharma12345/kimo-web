@@ -44,7 +44,17 @@ export interface RendererInit {
   height: number;
   resolution?: number;
 }
+export interface FrameCapture {
+  blob: Blob;
+  width: number;
+  height: number;
+}
+export interface RenderOptions {
+  capture?: boolean;
+  signal?: AbortSignal;
+}
 export interface RenderResult {
+  frame?: FrameCapture;
   submitted: boolean;
   retained: boolean;
   approximations: Approximation[];
@@ -52,7 +62,7 @@ export interface RenderResult {
 export interface SceneRenderer {
   init(options: RendererInit): Promise<void>;
   resize(width: number, height: number, resolution?: number): void;
-  render(scene: SceneGraph): Promise<RenderResult>;
+  render(scene: SceneGraph, options?: RenderOptions): Promise<RenderResult>;
   /** Cancels deferred resource/font work while retaining the last good frame. */
   cancelPending?(): void;
   destroy(): void;

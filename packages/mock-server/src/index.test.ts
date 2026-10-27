@@ -203,10 +203,11 @@ describe('mock HTTP and websocket integration', () => {
         renderId,
       );
       await new Promise((r) => setTimeout(r, 40));
-      expect((await app.client.session(session.sessionId)).videoId).toBe(
-        session.sessionId,
-      );
+      const restored = await app.client.session(session.sessionId);
       const render = await app.client.render(renderId);
+      expect(restored.videoId).toBe(render.videoId);
+      expect(restored.videoId).toBeTruthy();
+      expect(restored.videoId).not.toBe(session.sessionId);
       expect(render).toMatchObject({ status: 'done', progress: 1 });
       expect((await app.client.video(render.videoId ?? '')).url).toContain(
         '/fixtures/',

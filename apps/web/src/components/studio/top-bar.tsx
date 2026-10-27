@@ -36,15 +36,20 @@ export function StudioTopBar({
   togglePanel,
   onLeave,
   projectSave,
+  projectTitle,
+  onTitleChange,
 }: {
   sessionId: string;
   commands: StudioCommands;
   togglePanel: (panel: 'agent' | 'inspector') => void;
   onLeave: () => void;
   projectSave?: SaveStatus;
+  projectTitle?: string;
+  onTitleChange?: (title: string) => void;
 }) {
   const state = useStudio();
-  const [title, setTitle] = React.useState('untitled video');
+  const [localTitle, setLocalTitle] = React.useState('untitled video');
+  const title = projectTitle ?? localTitle;
   const [draft, setDraft] = React.useState(title);
   const [editing, setEditing] = React.useState(false);
   const [leave, setLeave] = React.useState(false);
@@ -57,7 +62,7 @@ export function StudioTopBar({
   React.useEffect(() => {
     try {
       const stored = localStorage.getItem(`kimo-studio-title:v1:${sessionId}`);
-      setTitle(stored || 'untitled video');
+      setLocalTitle(stored || 'untitled video');
     } catch {
       /* In-memory fallback. */
     }
@@ -73,7 +78,8 @@ export function StudioTopBar({
   }, [sessionId]);
   function saveTitle() {
     const value = draft.trim() || 'untitled video';
-    setTitle(value);
+    setLocalTitle(value);
+    onTitleChange?.(value);
     setEditing(false);
     setSave('saving…');
     try {

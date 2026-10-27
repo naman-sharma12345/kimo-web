@@ -24,6 +24,7 @@ import type {
   SceneRenderer,
   PreparedRendererResource,
   RendererResourceRequest,
+  RenderResult,
 } from './renderer-types';
 import type { SceneGraph } from './types';
 
@@ -50,6 +51,14 @@ function readRleFrame(value: unknown): MaskRleFrame {
     height: value.height,
     counts: value.counts as number[],
   };
+}
+export interface PosterResult {
+  blob: Blob;
+  time: number;
+  projectVersion: number;
+  width: number;
+  height: number;
+  approximations: readonly string[];
 }
 export interface TransportState {
   playing: boolean;
@@ -166,6 +175,13 @@ const initialTransport: TransportState = {
 };
 /** Sole animation-loop owner. React receives transport/telemetry at most ten times per second. */
 export class CompositorController implements ControllerPreviewAPI {
+  private capture: {
+    revision: number;
+    signal?: AbortSignal;
+    resolve: (result: RenderResult) => void;
+    reject: (error: Error) => void;
+  } | null = null;
+  private transportIntent = 0;
   private project: KimoProject;
   private assets: Record<string, Asset> = {};
   private readonly renderer: ControllerOptions['renderer'];
@@ -351,8 +367,92 @@ export class CompositorController implements ControllerPreviewAPI {
   /** Preview-only suppression; published scene remains measurable and no op is produced. */
   setEditingTextClip(clipId: string | null): void {
     if (this.disposed || clipId === this.editingTextClip) return;
+    this.transportIntent++;
     this.editingTextClip = clipId;
     this.invalidate();
+  }
+  /** A transaction on the sole preview loop, never a source thumbnail or blind canvas read. */
+  async getFrame(
+    time: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<PosterResult> {
+    if (this.disposed || !this.ready)
+      throw new Error('poster unavailable: compositor not ready');
+    if (this.capture) throw new Error('poster capture already active');
+    if (this.editingTextClip)
+      throw new Error('poster unavailable: finish text editing first');
+    if (!Number.isFinite(time) || this.project.duration <= 0)
+      throw new Error('poster unavailable: no playable frame');
+    if (options.signal?.aborted) throw new Error('poster capture aborted');
+    const project = this.project;
+    const projectVersion = project.version;
+    const priorTime = this.currentTime;
+    const priorTransport = { ...this.transport };
+    const target = Math.max(
+      0,
+      Math.min(time, Math.max(0, project.duration - 1 / project.fps)),
+    );
+    this.setTransport(
+      { ...priorTransport, playing: false, scrubbing: false, shuttle: 0 },
+      target,
+    );
+    const owned = this.transportIntent;
+    const revision = this.revision;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => {
+      this.renderer.cancelPending?.();
+      this.capture?.reject(new Error('poster capture aborted'));
+    };
+    try {
+      const result = await new Promise<RenderResult>((resolve, reject) => {
+        this.capture = { revision, signal: options.signal, resolve, reject };
+        options.signal?.addEventListener('abort', abort, { once: true });
+        timeout = setTimeout(
+          () => this.capture?.reject(new Error('poster preparation timed out')),
+          10000,
+        );
+        this.dirty = true;
+        this.schedule();
+      });
+      if (
+        this.disposed ||
+        options.signal?.aborted ||
+        this.revision !== revision ||
+        this.project !== project ||
+        this.project.version !== projectVersion
+      )
+        throw new Error('poster capture invalidated');
+      if (
+        !result.submitted ||
+        result.retained ||
+        !result.frame ||
+        !result.frame.blob.size ||
+        !result.frame.blob.type.startsWith('image/') ||
+        !Number.isSafeInteger(result.frame.width) ||
+        !Number.isSafeInteger(result.frame.height) ||
+        result.frame.width <= 0 ||
+        result.frame.height <= 0
+      )
+        throw new Error(
+          'poster unavailable: renderer did not capture a submitted composition',
+        );
+      return {
+        ...result.frame,
+        time: target,
+        projectVersion,
+        approximations: result.approximations.map((value) => value.reason),
+      };
+    } finally {
+      clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abort);
+      this.capture = null;
+      if (
+        !this.disposed &&
+        this.transportIntent === owned &&
+        this.project === project
+      )
+        this.setTransport(priorTransport, priorTime);
+    }
   }
   markIngress(): void {
     this.ingress = this.now();
@@ -369,6 +469,7 @@ export class CompositorController implements ControllerPreviewAPI {
       this.issue(
         'renderer cancellation hook unavailable; stale async submission cannot be excluded',
       );
+    this.capture?.reject(new Error('poster capture invalidated'));
     this.revision++;
     this.metrics.revision = this.revision;
     this.dirty = true;
@@ -531,6 +632,7 @@ export class CompositorController implements ControllerPreviewAPI {
   }
   setTransport(next: TransportState, seek?: number): void {
     if (this.disposed) return;
+    this.transportIntent++;
     const previous = this.transport;
     this.transport = { ...next };
     if (seek !== undefined) {
@@ -598,6 +700,7 @@ export class CompositorController implements ControllerPreviewAPI {
     this.invalidate();
   }
   seek(time: number): void {
+    this.transportIntent++;
     this.follow = null;
     this.clock.seek(time);
     this.invalidate();
@@ -633,6 +736,10 @@ export class CompositorController implements ControllerPreviewAPI {
           : undefined);
       this.follow = null;
       if (target !== undefined && this.transport.followKimo) {
+        this.transportIntent++;
+        this.capture?.reject(
+          new Error('poster capture invalidated by follow intent'),
+        );
         const time = Math.min(this.project.duration, Math.max(0, target));
         if (this.transport.playing)
           this.options.onEditAt?.({ actionId: event.id, time });
@@ -794,6 +901,7 @@ export class CompositorController implements ControllerPreviewAPI {
       let fading = false;
       for (const layer of scene.layers)
         if (
+          !this.capture &&
           layer.kind === 'image' &&
           layer.assetId &&
           assets[layer.assetId]?.source === 'web' &&
@@ -931,7 +1039,12 @@ export class CompositorController implements ControllerPreviewAPI {
             ),
           }
         : scene;
-      const rendered = await this.renderer.render(renderScene);
+      const capture = this.capture?.revision === revision ? this.capture : null;
+      const rendered = await this.renderer.render(
+        renderScene,
+        capture ? { capture: true, signal: capture.signal } : undefined,
+      );
+      if (capture && current()) capture.resolve(rendered);
       this.renderInFlight = false;
       if (!current()) return;
       rendered.approximations.forEach((value) => this.issue(value.reason));
@@ -974,6 +1087,10 @@ export class CompositorController implements ControllerPreviewAPI {
       }
       // presentedFps is video rVFC evidence only, never composite GPU presentation.
     } catch (error) {
+      if (this.capture?.revision === revision)
+        this.capture.reject(
+          error instanceof Error ? error : new Error(String(error)),
+        );
       if (current())
         this.issue(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1034,16 +1151,19 @@ export class CompositorController implements ControllerPreviewAPI {
     }
     this.publicationPending = false;
     this.lastPublish = now;
-    this.options.onPlayback?.(
-      this.clock.currentTime,
-      this.clock.playing,
-      this.metrics.submittedFps,
-    );
+    // Capture is preview-internal: do not feed its temporary pause/seek into Studio intent.
+    if (!this.capture)
+      this.options.onPlayback?.(
+        this.clock.currentTime,
+        this.clock.playing,
+        this.metrics.submittedFps,
+      );
     this.options.onMetrics?.(this.debug);
   }
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.capture?.reject(new Error('poster unavailable: compositor disposed'));
     this.publishedScene = null;
     this.editingTextClip = null;
     this.revision++;

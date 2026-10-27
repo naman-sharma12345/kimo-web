@@ -422,6 +422,8 @@ export const sessionSnapshotSchema = z.object({
   wsUrl: z.string().optional(),
   videoId: id.optional(),
   renderId: id.optional(),
+  title: z.string().optional(),
+  editExpiresAt: z.string().datetime().optional(),
 });
 export const messageRequestSchema = z.object({
   text: z.string(),
@@ -435,9 +437,28 @@ export const opsRequestSchema = z.object({
 export const versionResponseSchema = z.object({
   version: z.number().int().nonnegative(),
 });
+export const approvalOptionsSchema = z
+  .object({
+    title: z.string().trim().min(1).max(200).optional(),
+    preset: z.literal('1080p').optional(),
+    burnInCaptions: z.boolean().optional(),
+    expectedProjectVersion: z.number().int().nonnegative().safe().optional(),
+  })
+  .strict();
+export const cancelRenderResponseSchema = z.object({
+  status: z.literal('cancelled'),
+  sessionId: id,
+});
+export const reopenSessionResponseSchema = z.object({
+  status: z.literal('editing'),
+});
 export const approvalResponseSchema = z.object({ renderId: id });
 export const renderSchema = z.object({
-  status: z.enum(['queued', 'rendering', 'done', 'failed']),
+  status: z.enum(['queued', 'rendering', 'done', 'failed', 'cancelled']),
+  sessionId: id.optional(),
+  error: z.object({ message: z.string() }).optional(),
+  fps: z.literal(30).optional(),
+  chunkIndex: z.number().int().nonnegative().safe().optional(),
   progress: z.number().min(0).max(1),
   frame: sec,
   totalFrames: sec,
@@ -445,6 +466,25 @@ export const renderSchema = z.object({
   videoId: id.optional(),
 });
 export const videoSchema = z.object({
+  sessionId: id.optional(),
+  editExpiresAt: z.string().datetime().optional(),
+  downloadExpiresAt: z.string().datetime().optional(),
+  createdInSec: sec.optional(),
+  audio: z
+    .object({
+      channels: z.number().int().positive().safe(),
+      sampleRateHz: z.number().int().positive().safe(),
+    })
+    .optional(),
+  history: z
+    .array(
+      z.object({
+        summary: z.string(),
+        stepCount: z.number().int().nonnegative().safe(),
+      }),
+    )
+    .optional(),
+  models: z.array(z.string()).optional(),
   url: z.string(),
   posterUrl: z.string(),
   durationSec: sec,
@@ -575,3 +615,9 @@ export type ClipShape = z.infer<typeof shapeSchema>;
 export type Keyframe = z.infer<typeof keyframeSchema>;
 export type Transition = z.infer<typeof transitionSchema>;
 export type TextStyleId = z.infer<typeof textStyleIdSchema>;
+
+export type ApprovalOptions = z.infer<typeof approvalOptionsSchema>;
+export type Render = z.infer<typeof renderSchema>;
+export type Video = z.infer<typeof videoSchema>;
+export type CancelRenderResponse = z.infer<typeof cancelRenderResponseSchema>;
+export type ReopenSessionResponse = z.infer<typeof reopenSessionResponseSchema>;

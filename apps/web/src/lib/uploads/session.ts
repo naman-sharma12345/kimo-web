@@ -68,7 +68,9 @@ export function sessionDestination(
           }
         : { kind: 'error' };
     case 'failed':
-      return { kind: 'error' };
+      return snapshot.renderId
+        ? { kind: 'redirect', href: `/render/${encoded}` }
+        : { kind: 'error' };
     default:
       return { kind: 'studio' };
   }

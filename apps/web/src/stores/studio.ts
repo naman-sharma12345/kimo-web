@@ -247,7 +247,13 @@ export const useStudio = create<StudioState>((set, get) => ({
   receive: (event) => {
     if (event.t === 'hello') set({ wsVersion: event.version });
     if (event.t === 'agent.status')
-      set({ agent: event.state, agentLabel: event.label });
+      set({
+        agent:
+          event.state === 'idle' && event.label === 'paused'
+            ? 'paused'
+            : event.state,
+        agentLabel: event.label,
+      });
     if (event.t === 'agent.action.start' && !get().actionIds.includes(event.id))
       set((state) => ({
         agent: 'acting',
@@ -259,7 +265,11 @@ export const useStudio = create<StudioState>((set, get) => ({
           : [...state.actionIds, event.id],
       }));
     if (event.t === 'agent.action.end' && get().activeAction?.id === event.id)
-      set({ activeAction: null, agentLabel: '', agent: 'thinking' });
+      set({
+        activeAction: null,
+        agentLabel: '',
+        agent: get().agent === 'paused' ? 'paused' : 'thinking',
+      });
     if (event.t === 'project.ops') set({ hasOps: true });
     if (
       event.t === 'agent.message' &&

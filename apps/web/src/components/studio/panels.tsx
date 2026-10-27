@@ -34,6 +34,7 @@ import { IconButton } from './controls';
 import { StudioTransport } from './transport';
 export interface StudioSlots {
   viewer?: React.ReactNode;
+  reviewOverlay?: React.ReactNode;
   transport?: React.ReactNode;
   timeline?: React.ReactNode;
   timelineFooter?: React.ReactNode;
@@ -240,6 +241,7 @@ export function ViewerPanel({
           aria-label="laying out first cut"
         />
       )}
+      {slots.reviewOverlay}
       <div className="studio-viewer-overlay">
         <span>
           {project.width} × {project.height} · {project.fps} fps

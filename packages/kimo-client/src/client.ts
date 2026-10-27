@@ -96,18 +96,53 @@ export class KimoClient {
       options?.signal,
     );
   }
-  approve(id: string) {
+  approve(
+    id: string,
+    input?: s.ApprovalOptions,
+    options?: { signal?: AbortSignal },
+  ) {
     return this.json(
       `/v1/sessions/${encodeURIComponent(id)}/approve`,
       s.approvalResponseSchema,
-      {},
+      s.approvalOptionsSchema.parse(input ?? {}),
+      options?.signal,
     );
   }
-  render(id: string) {
-    return this.json(`/v1/renders/${encodeURIComponent(id)}`, s.renderSchema);
+  render(id: string, options?: { signal?: AbortSignal }) {
+    return this.json(
+      `/v1/renders/${encodeURIComponent(id)}`,
+      s.renderSchema,
+      undefined,
+      options?.signal,
+    );
   }
-  video(id: string) {
-    return this.json(`/v1/videos/${encodeURIComponent(id)}`, s.videoSchema);
+  video(id: string, options?: { signal?: AbortSignal }) {
+    return this.json(
+      `/v1/videos/${encodeURIComponent(id)}`,
+      s.videoSchema,
+      undefined,
+      options?.signal,
+    );
+  }
+  renderFrameUrl(id: string, frame: number): string {
+    z.number().int().nonnegative().safe().parse(frame);
+    return `${this.base}/v1/renders/${encodeURIComponent(id)}/frame.jpg?n=${frame}`;
+  }
+  cancelRender(id: string, options?: { signal?: AbortSignal }) {
+    return this.json(
+      `/v1/renders/${encodeURIComponent(id)}/cancel`,
+      s.cancelRenderResponseSchema,
+      {},
+      options?.signal,
+    );
+  }
+  reopenSession(id: string, options?: { signal?: AbortSignal }) {
+    return this.json(
+      `/v1/sessions/${encodeURIComponent(id)}/reopen`,
+      s.reopenSessionResponseSchema,
+      {},
+      options?.signal,
+    );
   }
   /** Duplicate packets are ignored; a missing batch replaces state from the server. */
   async reconcile(

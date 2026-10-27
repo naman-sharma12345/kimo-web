@@ -14,6 +14,7 @@ import type {
   RendererOptions,
   RendererResourceRequest,
   RenderResult,
+  RenderOptions,
   SceneRenderer,
 } from './renderer-types';
 export type {
@@ -392,7 +393,11 @@ export class PixiRenderer implements SceneRenderer {
     this.pendingPreparations.forEach((cancel) => cancel());
     this.pendingPreparations.clear();
   }
-  async render(scene: SceneGraph): Promise<RenderResult> {
+  async render(
+    scene: SceneGraph,
+    options: RenderOptions = {},
+  ): Promise<RenderResult> {
+    if (options.signal?.aborted) throw new Error('poster capture aborted');
     if (!this.app || !this.root || this.disposed)
       throw new Error('renderer not initialized');
     if (scene.excludedTextPairs?.length) {
@@ -548,10 +553,36 @@ export class PixiRenderer implements SceneRenderer {
       releasePrepared();
       return { submitted: false, retained: true, approximations };
     }
-    const fontResults = await Promise.all(
+    const fontWork = Promise.all(
       scene.layers.map(async (l) => !l.text || (await this.fontReady(l.text))),
     );
-    if (this.disposed || revision !== this.revision) {
+    let fontResults: boolean[];
+    if (options.capture) {
+      let cancelFonts = () => {};
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        cancelFonts = () => {
+          releasePrepared();
+          reject(
+            new Error('poster capture invalidated during font preparation'),
+          );
+        };
+      });
+      this.pendingPreparations.set(revision, cancelFonts);
+      options.signal?.addEventListener('abort', cancelFonts, { once: true });
+      if (options.signal?.aborted) cancelFonts();
+      try {
+        fontResults = await Promise.race([fontWork, cancelled]);
+      } finally {
+        options.signal?.removeEventListener('abort', cancelFonts);
+      }
+      if (!preparedReleased)
+        this.pendingPreparations.set(revision, releasePrepared);
+    } else fontResults = await fontWork;
+    if (
+      this.disposed ||
+      revision !== this.revision ||
+      options.signal?.aborted
+    ) {
       releasePrepared();
       return { submitted: false, retained: this.hasFrame, approximations };
     }
@@ -559,6 +590,10 @@ export class PixiRenderer implements SceneRenderer {
       if (!fontResults[i])
         warn(l.clipId, 'canvas font unavailable; system fallback');
     });
+    if (options.capture && (pending || fontResults.some((ready) => !ready))) {
+      releasePrepared();
+      throw new Error('poster unavailable: resources or fonts not ready');
+    }
     try {
       this.root.scale.set(
         Math.min(
@@ -612,7 +647,72 @@ export class PixiRenderer implements SceneRenderer {
       this.app.renderer.background.alpha = alpha;
       this.app.render();
       this.hasFrame = true;
-      return { submitted: true, retained: false, approximations };
+      if (!options.capture)
+        return { submitted: true, retained: false, approximations };
+      // Readback is taken from this exact prepared tree before releasing its leases.
+      // Pixi uses this renderer's device, not another Application/context/ticker.
+      const scale = Math.min(
+        this.viewport.width / scene.width,
+        this.viewport.height / scene.height,
+      );
+      const canvas = this.app.renderer.extract.canvas({
+        target: this.root,
+        frame: new (required(this.pixi).Rectangle)(
+          0,
+          0,
+          scene.width,
+          scene.height,
+        ),
+        resolution: scale,
+        clearColor: scene.background ?? [0, 0, 0, 1],
+      });
+      const width = canvas.width,
+        height = canvas.height;
+      // Encoding is asynchronous. Invalidation must release the existing loop
+      // promptly rather than leave playback waiting on an abandoned callback.
+      let cancelReadback = () => {};
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        cancelReadback = () => reject(new Error('poster capture invalidated'));
+      });
+      this.pendingPreparations.set(revision, () => {
+        releasePrepared();
+        cancelReadback();
+      });
+      options.signal?.addEventListener('abort', cancelReadback, { once: true });
+      const encode = async (): Promise<Blob> =>
+        canvas.convertToBlob
+          ? canvas.convertToBlob({ type: 'image/png' })
+          : new Promise<Blob>((resolve, reject) => {
+              if (!canvas.toBlob)
+                return reject(new Error('poster encoding unavailable'));
+              canvas.toBlob(
+                (value) =>
+                  value
+                    ? resolve(value)
+                    : reject(new Error('poster readback failed')),
+                'image/png',
+              );
+            });
+      let blob: Blob;
+      try {
+        blob = await Promise.race([encode(), cancelled]);
+      } finally {
+        options.signal?.removeEventListener('abort', cancelReadback);
+      }
+      if (
+        this.disposed ||
+        revision !== this.revision ||
+        options.signal?.aborted
+      )
+        throw new Error('poster capture invalidated');
+      if (!blob.size || blob.type !== 'image/png' || width <= 0 || height <= 0)
+        throw new Error('poster readback unavailable');
+      return {
+        submitted: true,
+        retained: false,
+        approximations,
+        frame: { blob, width, height },
+      };
     } finally {
       releasePrepared();
     }
