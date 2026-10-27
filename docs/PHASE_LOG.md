@@ -123,6 +123,28 @@ The prior disposable-preview transport smoke succeeded for HTTP, actual WebSocke
 
 ### Browser-found restoration defect
 
-The real browser restored an awaiting-review session at project version 45 but Finish was disabled, because action IDs were discarded. The fix adds optional server-recorded `actionIds` to the REST snapshot. The mock records actual unique action-start events and the shell hydrates those IDs; project version is never used as an action count. Legacy snapshots without history remain supported and do not invent actions. Focused contract/mock/Studio tests pass. Fresh full lint, typecheck and all 133 tests in 16 files pass; the post-fix production build completed with `BUILD_EXIT=0` and zero warnings. The browser reload retest is still pending.
+The real browser restored an awaiting-review session at project version 45 but Finish was disabled, because action IDs were discarded. The fix adds optional server-recorded `actionIds` to the REST snapshot. The mock records actual unique action-start events and the shell hydrates those IDs; project version is never used as an action count. Legacy snapshots without history remain supported and do not invent actions. Focused contract/mock/Studio tests pass. Fresh full lint, typecheck and all 133 tests in 16 files pass; the post-fix production build completed with `BUILD_EXIT=0` and zero warnings. The browser reload retest passed at 2026-10-27 01:06 UTC: actual REST action IDs were present, the direct Studio restored them, and Finish remained enabled after reload. Evidence: `screens/phase-05-restored-finish-1920.png`.
 
 Transport verification at 2026-10-27 00:39 UTC passed actual HTTP, WebSocket project operations, the 8,011,107-byte MP4 fixture, binary upload/download round trip and blocked private paths. Browser runtime errors were empty. The disposable preview subsequently stopped; its historical URL is not a live deployment.
+
+### Published checkpoint and remaining flow boundary
+
+Checkpoint `e0aead39282768efedaf70b5554a612300ed2d79` was published with parent `1452b6022caaf0e1cc99ced14ef1f80b0bd51116`. All 157 paths, Git blob hashes and file modes match the frozen intended tree `270e614ec07822197b4e8df77bbbafa6a62da963`. One dispatch, no retry, no deletions; the temporary approved-source transfer was removed. This is a tested implementation checkpoint, not unconditional phase acceptance.
+
+The single follow-up landing flow reached ready with unfolding=true, but no Studio request occurred during the observed interval. The native transition API was present and CSS animation clocks were reported at zero. Subsequent preview-process loss caused connection errors. These observations do not prove a native transition bug or cached redirect; no prefetch redirect was observed. A defensive bounded navigation fallback is being implemented so cosmetic transitions cannot indefinitely delay essential routing, then requires fresh gates and a real-browser flow check.
+
+### Bounded cosmetic-transition safeguard
+
+Native transition callbacks are no longer an unbounded routing dependency. The shared once-only helper keeps the existing native animation, but dispatches navigation after the existing 220ms crossfade bound if the callback has not run. Native throws and rejected lifecycle promises use the same guard; cleanup cancels pending work and reduced motion navigates directly after the existing route delay. Late native callbacks cannot navigate twice. The original warm-up 400ms beat plus 900ms unfold, prefetch behavior and authoritative REST routing are unchanged.
+
+The exact original stall cause is still unproven; this is a defensive navigation guarantee under normal JavaScript timer scheduling, not proof of a native-browser bug. Full lint, typecheck, **151 tests in 18 files**, and production build passed sequentially with `GATES_EXIT=0` at 2026-10-27 01:18 UTC. Tests cover absent/deferred/throwing/rejecting native APIs, once-only behavior, cleanup, reduced motion and both route integrations. The full browser flow retest is pending.
+
+### Restart-resilient synthetic test preview
+
+The next full flow attempt reached automatic warm-up and triggered Studio compilation, but execution restart destroyed the temporary services and browser continuity before Studio completion could be verified. This remains infrastructure-interrupted, not an established application failure or an end-to-end pass.
+
+A manually dispatched GitHub Actions test preview now provides a lifecycle independent of this execution environment. The repository permission is read-only, checkout credentials are not persisted, child environments are allowlisted, all mock routes are method/path restricted, HTTP request bodies are capped at 32 MiB and websocket buffers at 1 MiB. The public endpoint contains synthetic fixture data only, uses a checksum-verified official tunnel binary and shuts down no later than 15 minutes after gateway startup. A URL/expiry-only artifact is uploaded before the bounded hold so a browser test can retrieve it during the run. No production engine, provider keys, private workspace or permanent deployment is included.
+
+Server-rendered requests may use the optional internal gateway URL; browsers continue using the public API URL. Four regressions cover that separation. Eight gateway tests cover route/method boundaries, environment isolation, real local synthetic HTTP/WebSocket transport, URL validation and declared/chunked body caps. Full integrated lint, typecheck, **163 tests across 20 files**, and production build passed sequentially with `GATES_EXIT=0` at 2026-10-27 01:38 UTC. A test-double lint issue and the integrated Next ProcessEnv type requirement were corrected before that successful run.
+
+Hosted workflow execution, artifact availability during the active run and the automatic browser flow remain pending. The code and authored workflow are not evidence of a running deployment.

@@ -26,6 +26,7 @@ import {
 import { useToast } from '@/components/ui/toast';
 import { persistSession, useUploads } from '@/lib/uploads';
 import { durations, easings, spring } from '@/lib/motion';
+import { navigationTransition } from '@/lib/navigation-transition';
 import {
   fileAccept,
   fileKind,
@@ -77,6 +78,15 @@ export function LandingPage() {
   filesRef.current = files;
   const uploadItems = useUploads((state) => state.items);
   const inFlight = useRef(false);
+  const mounted = useRef(false);
+  const cancelNavigation = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      cancelNavigation.current?.();
+    };
+  }, []);
   const sessionStarted = useRef(false);
   const dragDepth = useRef(0);
   const attach = useCallback(
@@ -229,10 +239,10 @@ export function LandingPage() {
       await new Promise((resolve) =>
         setTimeout(resolve, (reduced ? durations.d3 : durations.d5) * 1000),
       );
+      if (!mounted.current) return;
       const navigate = () =>
         router.push(`/warmup/${encodeURIComponent(session.sessionId)}`);
-      if (document.startViewTransition) document.startViewTransition(navigate);
-      else navigate();
+      cancelNavigation.current = navigationTransition(navigate, !!reduced);
     } catch {
       setSending(false);
       inFlight.current = false;

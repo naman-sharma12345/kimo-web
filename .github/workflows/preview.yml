@@ -1,0 +1,141 @@
+name: Temporary synthetic frontend preview
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install FFmpeg for synthetic fixtures
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install locked dependencies including dev tools and generate fixtures
+        run: pnpm install --frozen-lockfile --prod=false
+      - name: Verify generated fixtures
+        run: |
+          for file in clip-1.mp4 clip-2.mp4 clip-3.mp4 image.png music.wav; do
+            test -s "packages/mock-server/fixtures/$file"
+          done
+      - name: Download and verify official pinned cloudflared
+        run: |
+          mkdir -p "$RUNNER_TEMP/kimo-preview-tools"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
+            https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-linux-amd64 \
+            -o "$RUNNER_TEMP/kimo-preview-tools/cloudflared"
+          echo "ae5e8add7884b0531d66bbca4570d1de491ff6da51e4ebe7eb160cdf241d9e42  $RUNNER_TEMP/kimo-preview-tools/cloudflared" | sha256sum --check --strict
+          chmod 700 "$RUNNER_TEMP/kimo-preview-tools/cloudflared"
+      - name: Test gateway boundaries
+        run: pnpm exec vitest run packages/mock-server/src/preview.test.ts --environment node
+      - name: Start preview and await artifact readiness
+        timeout-minutes: 6
+        env:
+          KIMO_CLOUDFLARED: ${{ runner.temp }}/kimo-preview-tools/cloudflared
+          KIMO_PREVIEW_URL_FILE: ${{ runner.temp }}/kimo-preview/url.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          state="$RUNNER_TEMP/kimo-preview"
+          umask 077
+          mkdir -p "$state"
+          ready=0
+          cleanup_on_failure() {
+            if [ "$ready" -ne 1 ] && [ -f "$state/supervisor.pid" ]; then
+              kill -TERM "$(cat "$state/supervisor.pid")" 2>/dev/null || true
+            fi
+          }
+          trap cleanup_on_failure EXIT
+          trap 'exit 1' INT TERM
+          # Redirect ALL descriptors: the background service must not retain a step pipe.
+          # The wrapper records exit status because a later step cannot shell-wait its PID.
+          nohup bash -c '
+            set +e
+            node --import tsx packages/mock-server/src/preview.ts &
+            child=$!
+            printf "%s\n" "$child" > "$RUNNER_TEMP/kimo-preview/supervisor.pid"
+            stop_child() { kill -TERM "$child" 2>/dev/null || true; }
+            trap stop_child INT TERM
+            wait "$child"
+            result=$?
+            printf "%s\n" "$result" > "$RUNNER_TEMP/kimo-preview/exit-code"
+            exit "$result"
+          ' </dev/null >"$state/preview.log" 2>&1 &
+          printf "%s\n" "$!" > "$state/wrapper.pid"
+          for attempt in $(seq 1 300); do
+            if [ -f "$state/exit-code" ]; then
+              echo "Preview exited before artifact readiness" >&2
+              exit 1
+            fi
+            if [ -s "$state/url.json" ]; then
+              node --import tsx --input-type=module -e '
+                import { readFileSync } from "node:fs";
+                import { validatePreviewUrl } from "./packages/mock-server/src/preview.ts";
+                const value = JSON.parse(readFileSync(process.env.KIMO_PREVIEW_URL_FILE, "utf8"));
+                if (Object.keys(value).sort().join(",") !== "expiresAt,url") throw new Error("Unexpected artifact fields");
+                console.log("KIMO_TEST_PREVIEW_URL=" + validatePreviewUrl(value.url));
+                if (!Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= Date.now()) throw new Error("Invalid expiry");
+              '
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+      - name: Publish live URL only (before holding)
+        uses: actions/upload-artifact@v4
+        with:
+          name: kimo-test-preview-url
+          path: ${{ runner.temp }}/kimo-preview/url.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Hold until bounded preview exits
+        timeout-minutes: 17
+        shell: bash
+        run: |
+          set -euo pipefail
+          state="$RUNNER_TEMP/kimo-preview"
+          cleanup() {
+            if [ -f "$state/supervisor.pid" ]; then
+              kill -TERM "$(cat "$state/supervisor.pid")" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          trap 'exit 1' INT TERM
+          for attempt in $(seq 1 960); do
+            if [ -f "$state/exit-code" ]; then
+              test "$(cat "$state/exit-code")" = 0
+              exit $?
+            fi
+            kill -0 "$(cat "$state/wrapper.pid")" 2>/dev/null || exit 1
+            sleep 1
+          done
+          echo "Preview exceeded bounded hold" >&2
+          exit 1
+      - name: Always stop preview and remove temporary files
+        if: always()
+        shell: bash
+        run: |
+          state="$RUNNER_TEMP/kimo-preview"
+          if [ -f "$state/supervisor.pid" ]; then
+            pid=$(cat "$state/supervisor.pid")
+            kill -TERM "$pid" 2>/dev/null || true
+            for attempt in $(seq 1 10); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            kill -KILL "$pid" 2>/dev/null || true
+          fi
+          if [ -f "$state/wrapper.pid" ]; then
+            kill -TERM "$(cat "$state/wrapper.pid")" 2>/dev/null || true
+          fi
+          rm -rf "$state" "$RUNNER_TEMP/kimo-preview-tools"

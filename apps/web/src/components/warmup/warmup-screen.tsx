@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/dialog';
 import { BrandMark } from '@/components/landing/brand';
 import { api } from '@/lib/api';
+import { navigationTransition } from '@/lib/navigation-transition';
 import { useSession } from '@/stores/session';
 import { useProject } from '@/stores/project';
 import { useUploads } from '@/lib/uploads';
@@ -244,13 +245,12 @@ export function WarmupScreen({ sessionId }: { sessionId: string }) {
       () => setUnfolding(true),
       reduced ? 0 : warmupTiming.beat,
     );
+    let cancelNavigation: (() => void) | undefined;
     const transition = setTimeout(
       () => {
         const navigate = () =>
           router.replace(`/studio/${encodeURIComponent(sessionId)}`);
-        if (document.startViewTransition)
-          document.startViewTransition(navigate);
-        else navigate();
+        cancelNavigation = navigationTransition(navigate, !!reduced);
       },
       reduced
         ? warmupTiming.crossfade
@@ -259,6 +259,7 @@ export function WarmupScreen({ sessionId }: { sessionId: string }) {
     return () => {
       clearTimeout(beat);
       clearTimeout(transition);
+      cancelNavigation?.();
     };
   }, [state.step, state.error, reduced, router, sessionId]);
   function stop() {

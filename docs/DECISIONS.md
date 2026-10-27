@@ -37,3 +37,9 @@ The actual pnpm mock and pnpm mock:demo commands succeeded. The CLI emitted 45 p
 - Pause/resume has no protocol acknowledgement. The pill exposes local dispatch intent, superseded by the next server state, rather than claiming backend acknowledgement.
 - The Phase 5 keyboard map assigns L to both loop and shuttle. L takes the central-map shuttle action; loop remains a keyboard-reachable toggle.
 - Future compositor, editing and agent-message operations are slots or explicitly labelled phase boundaries, not fake implementations.
+
+## Bounded test-preview recovery
+
+Repeated execution restarts destroyed local disposable-preview processes before full automatic navigation could be verified. A manually dispatched GitHub Actions preview is being added as a bounded synthetic test environment, not a production deployment. It uses read-only repository permissions, no provider/backend credentials, allowlisted mock routes, and an automatic shutdown. No local browser or Playwright execution is introduced.
+
+`KIMO_API_INTERNAL_URL` optionally routes server-rendered requests to the same typed API over an internal service address; the browser continues using only `NEXT_PUBLIC_KIMO_API`. When unset, existing defaults are unchanged. This prevents a fresh public tunnel's DNS propagation from becoming an SSR dependency. No secrets are embedded or copied into browser configuration.
