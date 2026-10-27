@@ -256,7 +256,15 @@ export function InspectorEditor(props: InspectorEditorProps) {
   );
   const selectionKey = [props.project.id, ...props.selection].join(':');
   return (
-    <div className={styles.inspector} aria-label="inspector">
+    <div
+      className={styles.inspector}
+      aria-label="inspector"
+      data-action-id={props.activeAction?.id}
+      data-clip-id={props.activeAction?.clipId}
+    >
+      {props.activeAction ? (
+        <p role="status">{props.activeAction.title}</p>
+      ) : null}
       {error && (
         <p className={styles.error} role="alert">
           {error}

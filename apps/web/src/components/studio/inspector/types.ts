@@ -29,6 +29,7 @@ export interface InspectorEditorProps {
   selection: readonly string[];
   playhead: number;
   propertyActivity?: readonly PropertyActivity[];
+  activeAction?: { id: string; clipId?: string; title: string } | null;
   onMaskOpen?: (open: boolean) => void;
   onMessage?: (text: string, clipId: string) => void | Promise<void>;
   onReplace?: (

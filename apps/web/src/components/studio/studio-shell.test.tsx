@@ -8,6 +8,10 @@ import {
 } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerEvent, SessionSnapshot } from '@kimo/client';
+import {
+  project as sceneProject,
+  source as sceneSource,
+} from './timeline/test-fixtures';
 import { StudioShell } from './studio-shell';
 import { useStudio } from '@/stores/studio';
 const mocks = vi.hoisted(() => ({
@@ -16,9 +20,12 @@ const mocks = vi.hoisted(() => ({
   receive: undefined as ((event: ServerEvent) => void) | undefined,
   send: vi.fn(),
   close: vi.fn(),
+  message: vi.fn(async () => {}),
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mocks.push }) }));
-vi.mock('@/lib/api', () => ({ api: { connect: mocks.connect } }));
+vi.mock('@/lib/api', () => ({
+  api: { connect: mocks.connect, message: mocks.message },
+}));
 const snapshot: SessionSnapshot = {
   status: 'editing',
   project: {
@@ -83,9 +90,7 @@ describe('Phase 5 studio shell integration', () => {
       'studio-statusbar',
     ])
       expect(screen.getByTestId(id)).toBeInTheDocument();
-    expect(screen.getByLabelText('original request')).toHaveTextContent(
-      'my original request',
-    );
+    expect(screen.getAllByText('my original request')).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'finish' })).toBeDisabled();
     expect(screen.getByText('preview fps unavailable')).toBeInTheDocument();
     expect(screen.getByText('proxies unknown')).toBeInTheDocument();
@@ -132,7 +137,11 @@ describe('Phase 5 studio shell integration', () => {
       }),
     );
     expect(useStudio.getState().actionIds).toEqual(actionIds);
-    expect(screen.getByText('· 2 actions')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'waiting for you' }),
+    ).toBeInTheDocument();
+    expect(useStudio.getState().activeAction).toBeNull();
+    expect(screen.queryByText('· 2 actions')).not.toBeInTheDocument();
     act(() =>
       mocks.receive?.({
         t: 'agent.action.start',
@@ -299,10 +308,9 @@ describe('Phase 5 studio shell integration', () => {
     expect(useStudio.getState().playing).toBe(true);
     fireEvent.keyDown(window, { key: 'ArrowRight', shiftKey: true });
     expect(useStudio.getState().playhead).toBe(1);
-    fireEvent.keyDown(
-      screen.getByRole('textbox', { name: 'tell kimo what to change' }),
-      { key: ' ' },
-    );
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'message kimo' }), {
+      key: ' ',
+    });
     expect(useStudio.getState().playing).toBe(true);
     fireEvent.keyDown(window, { key: '?', shiftKey: true });
     expect(screen.getByRole('dialog')).toHaveTextContent('keyboard shortcuts');
@@ -381,4 +389,131 @@ describe('Phase 5 studio shell integration', () => {
       screen.queryByText('live preview connects in Phase 6'),
     ).not.toBeInTheDocument();
   });
+});
+
+describe('Phase 8 Shell transport integration', () => {
+  function enter(text: string) {
+    const editor = screen.getByRole('textbox', { name: 'message kimo' });
+    editor.textContent = text;
+    fireEvent.input(editor);
+    return editor;
+  }
+  it('routes Mod+Enter once through the existing HTTP client', async () => {
+    render(
+      <StudioShell sessionId="send" snapshot={snapshot} subscribe={false} />,
+    );
+    const editor = enter('make the intro shorter');
+    fireEvent.keyDown(editor, { key: 'Enter', ctrlKey: true });
+    await waitFor(() => expect(mocks.message).toHaveBeenCalledTimes(1));
+    expect(mocks.message).toHaveBeenCalledWith(
+      'send',
+      'make the intro shorter',
+    );
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+  it('retains composer draft across collapse and sends one legacy interrupt, not HTTP too', async () => {
+    render(
+      <StudioShell
+        sessionId="interrupt"
+        snapshot={{ ...snapshot, wsUrl: 'ws://example.test/s' }}
+      />,
+    );
+    act(() =>
+      mocks.receive?.({
+        t: 'agent.action.start',
+        id: 'a',
+        tool: 'trim_clip',
+        title: 'trimming beach',
+        args: {},
+        target: { clipId: 'beach', time: 2 },
+      }),
+    );
+    enter('keep this part');
+    fireEvent.click(screen.getByRole('button', { name: 'collapse agent' }));
+    fireEvent.click(screen.getByRole('button', { name: 'expand agent' }));
+    expect(
+      screen.getByRole('textbox', { name: 'message kimo' }),
+    ).toHaveTextContent('keep this part');
+    fireEvent.click(screen.getByRole('button', { name: 'send' }));
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(mocks.send.mock.calls[0]?.[0] as string)).toEqual({
+      t: 'interrupt',
+      text: 'keep this part',
+    });
+    expect(mocks.message).not.toHaveBeenCalled();
+    expect(mocks.connect).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('.studio-agent-status')).toHaveAttribute(
+      'data-action-id',
+      'a',
+    );
+    expect(
+      document.querySelector('[aria-label="inspector"][data-action-id]'),
+    ).toHaveAttribute('data-clip-id', 'beach');
+  });
+  it('keeps the controller usable after React development effect replay', async () => {
+    render(
+      <React.StrictMode>
+        <StudioShell sessionId="strict" snapshot={snapshot} subscribe={false} />
+      </React.StrictMode>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    enter('strict note');
+    fireEvent.click(screen.getByRole('button', { name: 'send' }));
+    await waitFor(() =>
+      expect(mocks.message).toHaveBeenCalledWith('strict', 'strict note'),
+    );
+  });
+});
+
+it('projects one actual start target into all five surfaces without fabricating property edits', () => {
+  const targetSnapshot: SessionSnapshot = {
+    ...snapshot,
+    project: sceneProject(),
+    assets: [sceneSource],
+    wsUrl: 'ws://example.test/target',
+  };
+  render(
+    <StudioShell
+      sessionId="target"
+      snapshot={targetSnapshot}
+      slots={{ viewer: <span>custom preview</span> }}
+    />,
+  );
+  act(() =>
+    mocks.receive?.({
+      t: 'agent.action.start',
+      id: 'target-action',
+      tool: 'trim_clip',
+      title: 'trimming beach_02',
+      args: {},
+      target: { clipId: 'a', time: 4, region: { x: 10, y: 10, w: 30, h: 30 } },
+    }),
+  );
+  for (const selector of [
+    '.studio-agent-status',
+    '[data-testid="studio-viewer"]',
+    '[aria-label="inspector"][data-action-id]',
+    '[aria-label="agent panel"] section[data-action-id]',
+  ]) {
+    expect(document.querySelector(selector)).toHaveAttribute(
+      'data-action-id',
+      'target-action',
+    );
+    expect(document.querySelector(selector)).toHaveAttribute(
+      'data-clip-id',
+      'a',
+    );
+  }
+  expect(document.querySelector('[data-clip-proxy="a"]')).toHaveAttribute(
+    'data-active',
+    'true',
+  );
+  expect(
+    document.querySelector(
+      '[aria-label="agent panel"] [role="img"][data-action-id]',
+    ),
+  ).toHaveAttribute('data-action-id', 'target-action');
+  expect(mocks.connect).toHaveBeenCalledTimes(1);
 });

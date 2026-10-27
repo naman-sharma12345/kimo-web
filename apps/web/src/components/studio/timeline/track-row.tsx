@@ -354,6 +354,7 @@ export function TrackRow(props: TrackRowProps) {
             type="button"
             className={styles.proxy}
             data-clip-proxy={clip.id}
+            data-active={props.activeClipId === clip.id || undefined}
             tabIndex={clip.id === roving ? 0 : -1}
             aria-pressed={selection.includes(clip.id)}
             aria-label={`${clipLabel(clip, assets)}, ${clip.kind}, starts ${timecode(clip.start)}, ${Number(clip.duration.toFixed(2))} seconds${clip.locked ? ', locked' : ''}`}

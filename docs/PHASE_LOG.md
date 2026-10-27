@@ -245,3 +245,33 @@ Phase 6 GPU validation remains environment-blocked before renderer construction
 and shader compilation. No pixel, glyph-match, A/V-sync, hardware, assistive
 technology or server-fidelity acceptance is claimed from mocked source tests.
 Phase 8 planning is read-only; Phases 8 through 10 are not implemented yet.
+
+### Verified Phase 7 source publication, 2026-10-27 04:39 UTC
+
+This supersedes the earlier pending source-gate status: the stable final sequence passed lint, strict TypeScript, 746 tests in 64 files and production build, with all 327 gated paths byte-identical. Commit `ed4cacdaa0d72c253bc6265b02940f4a582b9c67` contains 324 verified public files, 158 upserts and no deletions. Private handoffs were excluded.
+
+One hosted browser run automatically reached Studio from one synthetic prompt and exposed actual Timeline/Inspector controls, renderer-unavailable status and disabled playback. Studio capture timed out and a restart lost the original session. Editing, persistence, pixels and visual acceptance remain open. Workflow completion is not an application acceptance pass.
+
+## Phase 8 integrated source checkpoint, 2026-10-27
+
+Nine conversation surfaces, audit filters, actual-action revert selection, composer mentions/commands and notifications share the existing single socket and editing authority. Source tests cover safe links/resources, scroll pinning, word streaming, synthetic interrupts/hard pause, single HTTP/interrupt dispatch, draft retention, StrictMode cleanup, failed interrupt recovery and common action target identity. There is no additional renderer scheduler, audio graph, decoder or external runtime dependency. Synthetic protocol extensions do not establish production agreement.
+
+Final combined gates are pending at this checkpoint. Full visual acceptance remains open:
+
+- [ ] Nine message types visually verified against the specification.
+- [ ] Audit filters and expanded JSON verified in the managed browser.
+- [ ] Interrupt, hard stop, mentions and commands verified end to end in browser.
+- [ ] Five-surface target agreement verified with actual rendering.
+- [ ] Actual agent revert verified through browser persistence.
+- [ ] Hidden title and native notification delivery verified in browser.
+- [ ] VoiceOver/NVDA announcements verified manually.
+
+Phases 9 and 10 remain outstanding. No full Phase 8 acceptance is claimed.
+
+### Phase 8 combined validation
+
+The integrated stable sequence completed successfully on 2026-10-27 at 05:21 UTC:
+lint, strict TypeScript, 825 tests in 77 files and production build. All 365 source
+paths remained unchanged throughout that run. A final foreground replay regression
+was added after this run; final publication requires rerunning the sequence on
+that settled source. The visual acceptance checklist remains open.

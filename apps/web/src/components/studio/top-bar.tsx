@@ -97,13 +97,15 @@ export function StudioTopBar({
         )[projectSave]
       : undefined;
   const saveLabel = projectSaveLabel ?? save;
-  const label = {
-    acting: 'kimo is editing',
-    thinking: 'kimo is thinking',
-    waiting_user: 'waiting for you',
-    paused: 'paused',
-    idle: 'waiting for you',
-  }[state.agent];
+  const label =
+    state.agentLabel ||
+    {
+      acting: 'kimo is editing',
+      thinking: 'kimo is thinking',
+      waiting_user: 'waiting for you',
+      paused: 'paused',
+      idle: 'waiting for you',
+    }[state.agent];
   return (
     <>
       <header className="studio-topbar" data-testid="studio-topbar">
@@ -165,6 +167,8 @@ export function StudioTopBar({
         <div className="studio-top-center">
           <button
             className="studio-agent-status"
+            data-action-id={state.activeAction?.id}
+            data-clip-id={state.activeAction?.target?.clipId}
             aria-label={label}
             onClick={() => {
               if (state.agentCollapsed) togglePanel('agent');

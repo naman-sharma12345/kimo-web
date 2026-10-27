@@ -41,6 +41,7 @@ export interface StudioSlots {
   timelineOwnsChrome?: boolean;
   inspector?: React.ReactNode;
   agentChat?: React.ReactNode;
+  agentOwnsScroll?: boolean;
   agentActions?: React.ReactNode;
   composer?: React.ReactNode;
 }
@@ -52,6 +53,7 @@ export function AgentPanel({
   tab,
   setTab,
   watchMode = false,
+  onStop,
 }: {
   prompt: string;
   slots: StudioSlots;
@@ -60,123 +62,145 @@ export function AgentPanel({
   tab: string;
   setTab: (value: string) => void;
   watchMode?: boolean;
+  onStop?: () => void;
 }) {
   const state = useStudio();
   const [text, setText] = React.useState('');
-  if (state.agentCollapsed && !watchMode)
-    return (
-      <Panel
-        flush
-        className="studio-agent studio-agent-rail"
-        aria-label="agent panel"
-        data-testid="studio-agent"
-      >
-        <Avatar />
-        <span
-          className="studio-unread"
-          data-unread={state.unread || undefined}
-          aria-label={state.unread ? 'unread activity' : 'no unread activity'}
-        />
-        <IconButton
-          icon={PanelLeftOpen}
-          label="expand agent"
-          onClick={toggle}
-        />
-      </Panel>
-    );
-  return (
+  const collapsed = state.agentCollapsed && !watchMode;
+  const rail = (
     <Panel
       flush
-      className="studio-agent"
+      className="studio-agent studio-agent-rail"
       aria-label="agent panel"
       data-testid="studio-agent"
     >
-      <div className="studio-panel-header">
-        <Avatar />
-        <h2>kimo</h2>
-        <span className="studio-flex" />
-        <IconButton
-          icon={History}
-          label="action history"
-          onClick={() => setTab('actions')}
-        />
-        <IconButton
-          icon={PanelLeftClose}
-          label="collapse agent"
-          onClick={toggle}
-        />
-      </div>
-      <Tabs value={tab} onValueChange={setTab} className="studio-agent-tabs">
-        <TabsList aria-label="agent activity">
-          <TabsTrigger value="chat">chat</TabsTrigger>
-          <TabsTrigger value="actions">actions</TabsTrigger>
-        </TabsList>
-        <TabsContent value="chat" className="studio-agent-scroll">
-          {prompt ? (
-            <article
-              className="studio-first-message"
-              aria-label="original request"
-            >
-              <Avatar identity="user" />
-              <p>{prompt}</p>
-            </article>
-          ) : null}
-          {slots.agentChat ?? (
-            <p className="studio-boundary">
-              live conversation connects in Phase 8
-            </p>
-          )}
-        </TabsContent>
-        <TabsContent value="actions" className="studio-agent-scroll">
-          {slots.agentActions ?? (
-            <p className="studio-boundary">
-              {state.actionIds.length} actions received this visit · action
-              history connects in Phase 8
-            </p>
-          )}
-        </TabsContent>
-      </Tabs>
-      {slots.composer ?? (
-        <div className="studio-composer-wrap">
-          {state.agent === 'acting' && (
-            <p className="studio-interrupt-hint">
-              kimo will stop after the current step and read your note
-            </p>
-          )}
-          <div className="studio-composer">
-            <textarea
-              ref={composerRef}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              aria-label="tell kimo what to change"
-              placeholder={
-                state.agent === 'acting'
-                  ? 'type to interrupt kimo…'
-                  : 'tell kimo what to change…'
-              }
-            />
-            <div>
-              <IconButton icon={Paperclip} label="attach (Phase 8)" disabled />
-              <span className="studio-flex" />
-              <Button
-                className="studio-send"
-                size="md"
-                variant="secondary"
-                iconOnly
-                aria-label="send (Phase 8)"
-                tooltip="sending connects in Phase 8"
-                disabled
-              >
-                <ArrowUp />
-              </Button>
-            </div>
-          </div>
-          <p className="studio-boundary studio-composer-boundary">
-            draft only · sending connects in Phase 8
-          </p>
-        </div>
-      )}
+      <Avatar
+        active={state.agent === 'acting'}
+        data-action-id={state.activeAction?.id}
+        data-clip-id={state.activeAction?.target?.clipId}
+      />
+      <span
+        className="studio-unread"
+        data-unread={state.unread || undefined}
+        aria-label={state.unread ? 'unread activity' : 'no unread activity'}
+      />
+      <IconButton icon={PanelLeftOpen} label="expand agent" onClick={toggle} />
     </Panel>
+  );
+  return (
+    <>
+      {collapsed ? rail : null}
+      <Panel
+        hidden={collapsed}
+        flush
+        className="studio-agent"
+        aria-label="agent panel"
+        data-testid="studio-agent"
+      >
+        <div className="studio-panel-header">
+          <Avatar
+            active={state.agent === 'acting'}
+            data-action-id={state.activeAction?.id}
+            data-clip-id={state.activeAction?.target?.clipId}
+          />
+          <h2>kimo</h2>
+          {state.agent === 'acting' && onStop ? (
+            <Button variant="ghost" size="xs" onClick={onStop}>
+              stop now
+            </Button>
+          ) : null}
+          <span className="studio-flex" />
+          <IconButton
+            icon={History}
+            label="action history"
+            onClick={() => setTab('actions')}
+          />
+          <IconButton
+            icon={PanelLeftClose}
+            label="collapse agent"
+            onClick={toggle}
+          />
+        </div>
+        <Tabs value={tab} onValueChange={setTab} className="studio-agent-tabs">
+          <TabsList aria-label="agent activity">
+            <TabsTrigger value="chat">chat</TabsTrigger>
+            <TabsTrigger value="actions">actions</TabsTrigger>
+          </TabsList>
+          <TabsContent
+            value="chat"
+            className="studio-agent-scroll"
+            style={slots.agentOwnsScroll ? { overflow: 'hidden' } : undefined}
+          >
+            {prompt && !slots.agentChat ? (
+              <article
+                className="studio-first-message"
+                aria-label="original request"
+              >
+                <Avatar identity="user" />
+                <p>{prompt}</p>
+              </article>
+            ) : null}
+            {slots.agentChat ?? (
+              <p className="studio-boundary">
+                live conversation connects in Phase 8
+              </p>
+            )}
+          </TabsContent>
+          <TabsContent value="actions" className="studio-agent-scroll">
+            {slots.agentActions ?? (
+              <p className="studio-boundary">
+                {state.actionIds.length} actions received this visit · action
+                history connects in Phase 8
+              </p>
+            )}
+          </TabsContent>
+        </Tabs>
+        {slots.composer ?? (
+          <div className="studio-composer-wrap">
+            {state.agent === 'acting' && (
+              <p className="studio-interrupt-hint">
+                kimo will stop after the current step and read your note
+              </p>
+            )}
+            <div className="studio-composer">
+              <textarea
+                ref={composerRef}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                aria-label="tell kimo what to change"
+                placeholder={
+                  state.agent === 'acting'
+                    ? 'type to interrupt kimo…'
+                    : 'tell kimo what to change…'
+                }
+              />
+              <div>
+                <IconButton
+                  icon={Paperclip}
+                  label="attach (Phase 8)"
+                  disabled
+                />
+                <span className="studio-flex" />
+                <Button
+                  className="studio-send"
+                  size="md"
+                  variant="secondary"
+                  iconOnly
+                  aria-label="send (Phase 8)"
+                  tooltip="sending connects in Phase 8"
+                  disabled
+                >
+                  <ArrowUp />
+                </Button>
+              </div>
+            </div>
+            <p className="studio-boundary studio-composer-boundary">
+              draft only · sending connects in Phase 8
+            </p>
+          </div>
+        )}
+      </Panel>
+    </>
   );
 }
 export function ViewerPanel({
@@ -190,6 +214,7 @@ export function ViewerPanel({
   slots: StudioSlots;
   viewerRef: React.RefObject<HTMLElement | null>;
 }) {
+  const activeAction = useStudio((s) => s.activeAction);
   const hasOps = useStudio((s) => s.hasOps);
   const zoom = useStudio((s) => s.viewerZoom);
   const guides = useStudio((s) => s.guides);
@@ -205,6 +230,8 @@ export function ViewerPanel({
       className="studio-viewer"
       aria-label="viewer"
       data-testid="studio-viewer"
+      data-action-id={activeAction?.id}
+      data-clip-id={activeAction?.target?.clipId}
     >
       {!hasOps && (
         <div

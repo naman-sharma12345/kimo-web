@@ -88,6 +88,8 @@ export interface StudioState extends StudioPreferences {
   requestPlayback: (playing: boolean, shuttle?: number) => void;
   sessionId: string;
   agent: AgentState;
+  agentLabel: string;
+  activeAction: Extract<ServerEvent, { t: 'agent.action.start' }> | null;
   actionIds: string[];
   reviewRequested: boolean;
   hasOps: boolean;
@@ -155,6 +157,8 @@ export const useStudio = create<StudioState>((set, get) => ({
     }),
   sessionId: '',
   agent: 'idle',
+  agentLabel: '',
+  activeAction: null,
   actionIds: [],
   reviewRequested: false,
   hasOps: false,
@@ -222,6 +226,8 @@ export const useStudio = create<StudioState>((set, get) => ({
       hasOps,
       reviewRequested,
       agent: reviewRequested ? 'waiting_user' : 'idle',
+      agentLabel: '',
+      activeAction: null,
       actionIds: [],
       playing: false,
       scrubbing: false,
@@ -240,19 +246,27 @@ export const useStudio = create<StudioState>((set, get) => ({
     }),
   receive: (event) => {
     if (event.t === 'hello') set({ wsVersion: event.version });
-    if (event.t === 'agent.status') set({ agent: event.state });
-    if (event.t === 'agent.action.start')
+    if (event.t === 'agent.status')
+      set({ agent: event.state, agentLabel: event.label });
+    if (event.t === 'agent.action.start' && !get().actionIds.includes(event.id))
       set((state) => ({
         agent: 'acting',
+        activeAction: event,
+        agentLabel: event.title,
         unread: state.agentCollapsed,
         actionIds: state.actionIds.includes(event.id)
           ? state.actionIds
           : [...state.actionIds, event.id],
       }));
+    if (event.t === 'agent.action.end' && get().activeAction?.id === event.id)
+      set({ activeAction: null, agentLabel: '', agent: 'thinking' });
     if (event.t === 'project.ops') set({ hasOps: true });
-    if (event.t === 'agent.message' && event.kind === 'ask_review')
+    if (
+      event.t === 'agent.message' &&
+      (event.kind === 'ask_review' || event.kind === 'ask_choice')
+    )
       set({
-        reviewRequested: true,
+        reviewRequested: event.kind === 'ask_review',
         agent: 'waiting_user',
         unread: get().agentCollapsed,
       });

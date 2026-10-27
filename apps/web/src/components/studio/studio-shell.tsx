@@ -1,7 +1,7 @@
 'use client';
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
-import type { ClientEvent, SessionSnapshot } from '@kimo/client';
+import type { SessionSnapshot } from '@kimo/client';
 import { api } from '@/lib/api';
 import { useProject } from '@/stores/project';
 import { useEditing } from '@/stores/editing';
@@ -16,6 +16,21 @@ import { copyClips, pasteClips, type ClipClipboard } from './edit-clipboard';
 import { addTextAtPlayhead } from './add-text-command';
 import { ReplaceMediaDialog } from './replace-media-dialog';
 import { actionProperties } from './action-properties';
+import { clipLabel } from '@/lib/editing/display';
+import { createAgentController } from '@/lib/agent/controller';
+import {
+  createAgentNotificationController,
+  type AgentNotificationController,
+} from '@/lib/agent/notifications';
+import {
+  ChatStream,
+  type AgentPresentationCallbacks,
+} from './agent/chat-stream';
+import { ActionsTable } from './agent/actions-table';
+import { AgentComposer, type AgentComposerHandle } from './agent/composer';
+import { NotificationPrompt } from './agent/notification-prompt';
+import { LiveAnnouncer } from './agent/live-announcer';
+import type { ComposerAttachment } from '@/lib/agent/composer-model';
 import type { PropertyActivity } from './inspector';
 import {
   deleteClips,
@@ -125,7 +140,7 @@ export function StudioShell({
   const [help, setHelp] = React.useState(false);
   const [boundary, setBoundary] = React.useState('');
   const [activity, setActivity] = React.useState('');
-  const [activeClipId, setActiveClipId] = React.useState<string | null>(null);
+  const activeClipId = state.activeAction?.target?.clipId ?? null;
   const [propertyActivity, setPropertyActivity] = React.useState<
     readonly PropertyActivity[]
   >([]);
@@ -143,9 +158,77 @@ export function StudioShell({
   const [textEditingId, setTextEditingId] = React.useState<string | null>(null);
   const clipboard = React.useRef<ClipClipboard | null>(null);
   const composer = React.useRef<HTMLTextAreaElement>(null);
+  const agentComposer = React.useRef<AgentComposerHandle>(null);
+  const assetsRef = React.useRef(assets);
+  assetsRef.current = assets;
+  const notificationRef = React.useRef<AgentNotificationController | null>(
+    null,
+  );
+  const [notifications, setNotifications] =
+    React.useState<AgentNotificationController | null>(null);
+  const [chatAttachments, setChatAttachments] = React.useState<
+    readonly ComposerAttachment[]
+  >([]);
   const viewer = React.useRef<HTMLElement>(null);
   const socket = React.useRef<WebSocket | null>(null);
   const uploadLife = React.useRef<AbortController | null>(null);
+  const agentController = React.useMemo(
+    () =>
+      createAgentController(
+        { sessionId, originalPrompt, actionIds: snapshot.actionIds },
+        {
+          assets: () => assetsRef.current,
+          acting: () => useStudio.getState().agent === 'acting',
+          message: (text) => api.message(sessionId, text),
+          send: (packet) => {
+            const current = socket.current;
+            if (!current || current.readyState !== WebSocket.OPEN) return false;
+            current.send(JSON.stringify(packet));
+            return true;
+          },
+          userSent: () => notificationRef.current?.userSent(),
+          attention: (event) => notificationRef.current?.attention(event),
+          intent: (agent) => useStudio.setState({ agent, agentLabel: '' }),
+        },
+      ),
+    [sessionId, originalPrompt, snapshot.actionIds],
+  );
+  const conversation = React.useSyncExternalStore(
+    agentController.subscribe,
+    agentController.getSnapshot,
+    agentController.getSnapshot,
+  );
+  const liveAgent = React.useRef(agentController);
+  React.useEffect(() => {
+    liveAgent.current = agentController;
+    const controller = createAgentNotificationController();
+    notificationRef.current = controller;
+    setNotifications(controller);
+    setChatAttachments([]);
+    return () => {
+      controller.dispose();
+      if (notificationRef.current === controller)
+        notificationRef.current = null;
+      // React's development effect replay must not permanently dispose this model.
+      queueMicrotask(() => {
+        if (
+          notificationRef.current === null ||
+          liveAgent.current !== agentController
+        )
+          agentController.dispose();
+      });
+    };
+  }, [agentController]);
+  const focusComposer = () => {
+    agentComposer.current?.focus();
+    if (!agentComposer.current) composer.current?.focus();
+  };
+  const focusTimeline = () => {
+    document
+      .querySelector<HTMLElement>('[role="grid"][aria-label="timeline editor"]')
+      ?.focus();
+  };
+
   const defaultCompositor = React.useRef<StudioCompositorHandle | null>(null);
   const compositor = compositorRef ?? defaultCompositor;
   React.useEffect(() => {
@@ -173,7 +256,6 @@ export function StudioShell({
     useStudio.setState(readPreferences(userKey));
     setSelectedTrackId(null);
     setPropertyActivity([]);
-    setActiveClipId(null);
     setAgentChange(undefined);
     const uploadController = new AbortController();
     uploadLife.current = uploadController;
@@ -191,7 +273,10 @@ export function StudioShell({
       storage,
       online: () => navigator.onLine,
       assetsChanged: (next) => setAssets([...next]),
-      activity: setActivity,
+      activity: (text) => {
+        setActivity(text);
+        agentController.system(text);
+      },
       selectionRemoved: (removed) => {
         useStudio.setState({
           selection: useStudio
@@ -213,25 +298,11 @@ export function StudioShell({
         },
       },
       messages: {
-        send: async (text, attachments) => {
-          await api.message(
-            sessionId,
-            text,
-            attachments ? [...attachments] : undefined,
-          );
-        },
+        send: (text, attachmentIds) =>
+          agentController.send({ text, attachmentIds }),
         prefill: (text) => {
-          if (composer.current) {
-            const setter = Object.getOwnPropertyDescriptor(
-              HTMLTextAreaElement.prototype,
-              'value',
-            )?.set;
-            setter?.call(composer.current, text);
-            composer.current.dispatchEvent(
-              new Event('input', { bubbles: true }),
-            );
-            composer.current.focus();
-          }
+          agentComposer.current?.prefill(text);
+          focusComposer();
         },
       },
     });
@@ -252,7 +323,7 @@ export function StudioShell({
       if (useEditing.getState().session === edit)
         useProject.getState().dispose();
     };
-  }, [sessionId, snapshot, userKey, slots.viewer]);
+  }, [sessionId, snapshot, userKey, slots.viewer, agentController]);
   React.useEffect(() => {
     useStudio.setState({ duration: project.duration });
   }, [project.duration]);
@@ -279,6 +350,7 @@ export function StudioShell({
       clearTimeout(handshake);
       if (disposed) return;
       useStudio.setState({ connection: 'reconnecting' });
+      agentController.connection(false);
       const delay = studioTiming.reconnect[retries++];
       if (delay === undefined) {
         useStudio.setState({ connection: 'disconnected' });
@@ -299,16 +371,15 @@ export function StudioShell({
             if (event.t !== 'asset.added' && event.t !== 'project.ops')
               compositor.current?.event(event);
             useStudio.getState().receive(event);
+            agentController.receive(event);
             if (event.t === 'agent.action.start') {
               runningActions.add(event.id);
-              if (event.target?.clipId) setActiveClipId(event.target.clipId);
             }
             if (event.t === 'agent.action.end') {
               runningActions.delete(event.id);
               setPropertyActivity((current) =>
                 current.filter((item) => item.actionId !== event.id),
               );
-              if (!runningActions.size) setActiveClipId(null);
             }
             if (
               event.t === 'project.ops' &&
@@ -333,21 +404,6 @@ export function StudioShell({
                 id: `${event.actionId}:${event.version}`,
                 ops: event.ops,
               });
-              const op = event.ops.find(
-                (op) =>
-                  'id' in op || op.op === 'clip.add' || op.op === 'text.update',
-              );
-              if (op) {
-                const id =
-                  op.op === 'clip.add'
-                    ? op.clip.id
-                    : op.op === 'text.update'
-                      ? op.clipId
-                      : 'id' in op
-                        ? op.id
-                        : null;
-                if (id) setActiveClipId(id);
-              }
             }
             if (event.t === 'asset.added') {
               const edit = useEditing.getState().session;
@@ -448,6 +504,7 @@ export function StudioShell({
           clearTimeout(handshake);
           retries = 0;
           useStudio.setState({ connection: 'connected' });
+          agentController.connection(true);
         };
         handshake = setTimeout(() => {
           if (current.readyState !== WebSocket.OPEN) current.close();
@@ -464,7 +521,7 @@ export function StudioShell({
       connection?.close();
       socket.current = null;
     };
-  }, [sessionId, snapshot.wsUrl, subscribe, compositor]);
+  }, [sessionId, snapshot.wsUrl, subscribe, compositor, agentController]);
   const togglePanel = React.useCallback(
     (panel: PanelName) => {
       useStudio.getState().togglePanel(panel);
@@ -472,15 +529,32 @@ export function StudioShell({
     },
     [userKey],
   );
+  const dispatchAgent = React.useCallback(
+    (kind: 'pause' | 'resume' | 'stop') => {
+      if (kind === 'resume') agentController.resume();
+      else agentController.pause(kind === 'stop');
+    },
+    [agentController],
+  );
+  const safeAgentIntent = React.useCallback(
+    (kind: 'pause' | 'resume' | 'stop') => {
+      try {
+        dispatchAgent(kind);
+      } catch (error) {
+        setBoundary(
+          error instanceof Error
+            ? error.message
+            : 'agent command was not dispatched',
+        );
+      }
+    },
+    [dispatchAgent],
+  );
   const pauseAgent = React.useCallback(() => {
-    const ws = socket.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const paused = useStudio.getState().agent === 'paused';
-    const message: ClientEvent = { t: paused ? 'resume' : 'pause' };
-    ws.send(JSON.stringify(message));
-    // Protocol has no pause acknowledgement; expose the sent local intent, not server confirmation.
-    useStudio.setState({ agent: paused ? 'thinking' : 'paused' });
-  }, []);
+    safeAgentIntent(
+      useStudio.getState().agent === 'paused' ? 'resume' : 'pause',
+    );
+  }, [safeAgentIntent]);
   const fullscreen = React.useCallback(() => {
     if (commands.fullscreen) {
       commands.fullscreen();
@@ -527,7 +601,7 @@ export function StudioShell({
           useStudio.setState({ agentCollapsed: false });
           setWatchTab('chat');
           setAgentTab('chat');
-          requestAnimationFrame(() => composer.current?.focus());
+          requestAnimationFrame(() => focusComposer());
           return;
         }
         if (id === 'pause-agent') {
@@ -663,14 +737,18 @@ export function StudioShell({
             ],
           });
         else if (id === 'escape') {
+          if (document.querySelector('[role="listbox"]')) return false;
           composer.current?.blur();
-          return false;
+          focusTimeline();
+          return true;
         } else if (id === 'undo') {
           if (commands.undo) commands.undo();
           else void useEditing.getState().session?.undoUser();
         } else if (id === 'redo') {
           if (commands.redo) commands.redo();
           else void useEditing.getState().session?.redoUser();
+        } else if (id === 'submit') {
+          agentComposer.current?.submit();
         } else {
           setBoundary(
             id === 'submit'
@@ -679,7 +757,7 @@ export function StudioShell({
           );
         }
       }),
-    [commands, pauseAgent, fullscreen, project.fps],
+    [commands, pauseAgent, fullscreen, project.fps, agentController],
   );
   const uploadFiles = async (files: readonly File[]) => {
     const life = uploadLife.current;
@@ -813,17 +891,8 @@ export function StudioShell({
             setAgentTab('chat');
             setWatchTab('chat');
             requestAnimationFrame(() => {
-              if (composer.current) {
-                const setter = Object.getOwnPropertyDescriptor(
-                  HTMLTextAreaElement.prototype,
-                  'value',
-                )?.set;
-                setter?.call(composer.current, text);
-                composer.current.dispatchEvent(
-                  new Event('input', { bubbles: true }),
-                );
-                composer.current.focus();
-              }
+              agentComposer.current?.prefill(text);
+              focusComposer();
             });
           }}
           mediaHandle={timelineMedia}
@@ -850,6 +919,15 @@ export function StudioShell({
           onSeek={state.seek}
           onReplace={(clipId, mode) => setReplacement({ clipId, mode })}
           propertyActivity={propertyActivity}
+          activeAction={
+            state.activeAction
+              ? {
+                  id: state.activeAction.id,
+                  clipId: state.activeAction.target?.clipId,
+                  title: state.activeAction.title,
+                }
+              : null
+          }
           captionTrackId={captionTrackId}
           lutAssets={builtinLutIds}
           onMaskOpen={(maskSectionOpen) =>
@@ -867,11 +945,230 @@ export function StudioShell({
           }
           levelMeter={outputMeter}
           onMessage={async (text) => {
-            await api.message(sessionId, text);
+            await agentController.send({ text });
           }}
         />
       ) : undefined),
   };
+  const finish = () => {
+    if (commands.finish) commands.finish();
+    else setBoundary('review flow connects in Phase 9');
+  };
+  const clipNames = Object.fromEntries(
+    Object.values(project.clips).map((clip) => [
+      clip.id,
+      clipLabel(clip, assets),
+    ]),
+  );
+  const orangeOwner =
+    state.agent === 'acting'
+      ? ('running' as const)
+      : state.reviewRequested
+        ? ('review' as const)
+        : ('none' as const);
+  const sendConversation = (text: string) => {
+    void agentController
+      .send({ text })
+      .catch((error: unknown) =>
+        setBoundary(
+          error instanceof Error
+            ? error.message
+            : 'message dispatch status unknown',
+        ),
+      );
+  };
+  const presentation: AgentPresentationCallbacks = {
+    onShow: (id) => {
+      const target = conversation.actions[id]?.target;
+      if (!target) {
+        setActivity('this action has no recorded target');
+        return;
+      }
+      const clip = target.clipId ? project.clips[target.clipId] : undefined;
+      if (clip)
+        useStudio.setState({ selection: [clip.id], inspectorCollapsed: false });
+      if (target.time !== undefined || clip)
+        useStudio.getState().seek(target.time ?? clip?.start ?? 0);
+    },
+    onRevert: (id) => {
+      const edit = useEditing.getState().session;
+      if (
+        !edit
+          ?.getState()
+          .history.some(
+            (entry) =>
+              entry.actionId === id &&
+              entry.author === 'agent' &&
+              entry.available,
+          )
+      ) {
+        setBoundary(
+          'this step has no available local preimage; it cannot be safely reverted',
+        );
+        return;
+      }
+      void edit
+        .revertAgentGroup(id)
+        .then((result) => {
+          if (result.status !== 'acknowledged')
+            setActivity(result.error ?? `revert ${result.status}`);
+        })
+        .catch((error: unknown) =>
+          setBoundary(
+            error instanceof Error ? error.message : 'revert status unknown',
+          ),
+        );
+    },
+    onViewMask: (clipId) => {
+      if (!project.clips[clipId]) {
+        setActivity('this mask target is no longer in the edit');
+        return;
+      }
+      useStudio.setState({
+        selection: [clipId],
+        inspectorCollapsed: false,
+        maskSectionOpen: true,
+        overlays: true,
+      });
+    },
+    onPlayFromStart: () => {
+      useStudio.getState().seek(0);
+      useStudio.getState().requestPlayback(true);
+    },
+    onFocusComposer: () => {
+      useStudio.setState({ agentCollapsed: false });
+      setAgentTab('chat');
+      focusComposer();
+    },
+    onRender: finish,
+    onSend: sendConversation,
+    onFeedback: (assetId, feedback) => {
+      const asset =
+        assets.find((asset) => asset.id === assetId) ??
+        conversation.assets[assetId];
+      if (asset)
+        sendConversation(
+          `${feedback === 'use' ? 'use this image' : 'not this image'}: ${asset.name} (${asset.id})`,
+        );
+    },
+    onRetry: (id) => {
+      const action = conversation.actions[id];
+      if (action)
+        sendConversation(
+          `please retry the failed ${action.tool} step (${action.id})`,
+        );
+    },
+  };
+  const agentSlots: StudioSlots = {
+    ...slots,
+    agentOwnsScroll: slots.agentChat ? slots.agentOwnsScroll : true,
+    agentChat: slots.agentChat ?? (
+      <ChatStream
+        {...presentation}
+        model={conversation}
+        assets={Object.fromEntries(assets.map((asset) => [asset.id, asset]))}
+        clipNames={clipNames}
+        orangeOwner={orangeOwner}
+        active={!state.agentCollapsed && agentTab === 'chat'}
+      />
+    ),
+    agentActions: slots.agentActions ?? (
+      <ActionsTable
+        model={conversation}
+        clipNames={clipNames}
+        orangeOwner={orangeOwner}
+        active={!state.agentCollapsed && agentTab === 'actions'}
+      />
+    ),
+    composer: slots.composer ?? (
+      <>
+        <AgentComposer
+          key={sessionId}
+          ref={agentComposer}
+          clips={Object.values(project.clips).map((clip) => ({
+            id: clip.id,
+            name: clipLabel(clip, assets),
+            thumbUrl: assets.find((asset) => asset.id === clip.assetId)
+              ?.thumbUrl,
+          }))}
+          attachments={chatAttachments}
+          working={state.agent === 'acting'}
+          stopped={state.agent === 'paused'}
+          orangeOwner={
+            state.agent === 'acting' || state.reviewRequested
+              ? 'other'
+              : 'composer'
+          }
+          parentHandlesModEnter={true}
+          onEscape={focusTimeline}
+          onSend={async (input) => {
+            await agentController.send(input);
+            setChatAttachments([]);
+          }}
+          onPause={() => dispatchAgent('pause')}
+          onResume={() => dispatchAgent('resume')}
+          onUndoLast={() => useEditing.getState().session?.undoUser()}
+          onRender={finish}
+          onStatus={setActivity}
+          onRemoveAttachment={(id) =>
+            setChatAttachments((current) =>
+              current.filter((item) => item.id !== id),
+            )
+          }
+          onUpload={async (files) => {
+            const life = uploadLife.current;
+            const batch = files.map((file) => ({
+              id: crypto.randomUUID(),
+              name: file.name,
+              status: 'uploading' as const,
+            }));
+            setChatAttachments((current) => [...current, ...batch]);
+            try {
+              const ids = await uploadFiles(files);
+              if (!life || life.signal.aborted || uploadLife.current !== life)
+                return;
+              const actual =
+                useEditing.getState().session?.getState().assets ??
+                assetsRef.current;
+              setChatAttachments((current) =>
+                current.map((item) => {
+                  const index = batch.findIndex(
+                    (pending) => pending.id === item.id,
+                  );
+                  if (index < 0) return item;
+                  const asset = actual.find((asset) => asset.id === ids[index]);
+                  return asset
+                    ? { ...item, asset, status: 'ready' }
+                    : { ...item, status: 'failed' };
+                }),
+              );
+            } catch (error) {
+              if (!life || life.signal.aborted || uploadLife.current !== life)
+                return;
+              setChatAttachments((current) =>
+                current.map((item) =>
+                  batch.some((pending) => pending.id === item.id)
+                    ? { ...item, status: 'failed' }
+                    : item,
+                ),
+              );
+              setActivity(
+                error instanceof Error
+                  ? error.message
+                  : 'attachment confirmation failed',
+              );
+            }
+          }}
+        />
+        {notifications ? (
+          <NotificationPrompt controller={notifications} />
+        ) : null}
+      </>
+    ),
+  };
+  const announcement = [...conversation.items]
+    .reverse()
+    .find((item) => item.kind === 'say' && (!item.stream || item.stream.done));
   const responsive = responsiveSizes(viewport.width);
   const sizes = Object.fromEntries(
     (['agent', 'inspector', 'timeline'] as const).map((panel) => [
@@ -953,8 +1250,9 @@ export function StudioShell({
         <div className="studio-upper">
           <AgentPanel
             prompt={originalPrompt}
-            slots={slots}
+            slots={agentSlots}
             composerRef={composer}
+            onStop={() => safeAgentIntent('stop')}
             toggle={() => togglePanel('agent')}
             tab={agentTab}
             setTab={setAgentTab}
@@ -1038,6 +1336,19 @@ export function StudioShell({
         editing={editingSession}
         onClose={() => setReplacement(null)}
         onUpload={uploadFiles}
+      />
+      <LiveAnnouncer
+        key={sessionId}
+        action={
+          state.activeAction
+            ? { id: state.activeAction.id, label: state.activeAction.title }
+            : null
+        }
+        message={
+          announcement?.kind === 'say'
+            ? { id: announcement.id, text: announcement.text }
+            : undefined
+        }
       />
       <StudioStatusBar activity={activity} />
       <ShortcutsDialog open={help} onOpenChange={setHelp} />

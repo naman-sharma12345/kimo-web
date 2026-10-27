@@ -1,0 +1,31 @@
+.prompt {
+  background: var(--ink-2);
+  color: var(--cream-100);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-12);
+  padding: var(--space-12);
+  font-family: var(--font-sans);
+  font-size: var(--t-13);
+  line-height: var(--leading-13);
+}
+.prompt p {
+  margin: 0 0 var(--space-8);
+}
+.prompt div {
+  display: flex;
+  gap: var(--space-8);
+}
+.prompt button {
+  min-height: var(--control-sm);
+  padding: var(--space-4) var(--space-8);
+  background: var(--ink-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-8);
+  color: var(--cream-100);
+  font: inherit;
+  cursor: pointer;
+}
+.prompt button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}

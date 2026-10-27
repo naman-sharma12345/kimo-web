@@ -459,6 +459,8 @@ export const serverEventSchema = z.discriminatedUnion('t', [
     t: z.literal('agent.status'),
     state: z.enum(['thinking', 'acting', 'waiting_user', 'idle']),
     label: z.string(),
+    // Phase 8 proposal: precise synthetic interrupt acknowledgement.
+    inReplyTo: id.optional(),
   }),
   z.object({
     t: z.literal('agent.action.start'),
@@ -497,6 +499,8 @@ export const serverEventSchema = z.discriminatedUnion('t', [
     ok: z.boolean(),
     error: z.string().optional(),
     durationMs: sec,
+    // Phase 8 proposal, not production producer agreement.
+    resultSummary: z.string().optional(),
   }),
   z.object({
     t: z.literal('project.ops'),
@@ -513,8 +517,19 @@ export const serverEventSchema = z.discriminatedUnion('t', [
     text: z.string(),
     kind: z.enum(['say', 'ask_review', 'ask_choice']),
     choices: z.array(z.string()).optional(),
+    // Cumulative text; increasing sequence within the same message ID.
+    stream: z
+      .object({
+        sequence: z.number().int().nonnegative().safe(),
+        done: z.boolean(),
+      })
+      .optional(),
   }),
-  z.object({ t: z.literal('asset.added'), asset: assetSchema }),
+  z.object({
+    t: z.literal('asset.added'),
+    asset: assetSchema,
+    actionId: id.optional(),
+  }),
   z.object({
     t: z.literal('sam.mask'),
     actionId: id.optional(),
@@ -532,7 +547,11 @@ export const serverEventSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('error'), code: z.string(), message: z.string() }),
 ]);
 export const clientEventSchema = z.discriminatedUnion('t', [
-  z.object({ t: z.literal('interrupt'), text: z.string() }),
+  z.object({
+    t: z.literal('interrupt'),
+    text: z.string(),
+    clientMessageId: id.optional(),
+  }),
   z.object({ t: z.literal('pause') }),
   z.object({ t: z.literal('resume') }),
   z.object({ t: z.literal('ping') }),

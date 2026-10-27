@@ -1,3 +1,8 @@
+import {
+  createHeldRunner,
+  createPausableTimers,
+  type HeldStep,
+} from './phase8-runner';
 import { targetsLockedEntity } from './agent-locks';
 import http from 'node:http';
 import {
@@ -40,6 +45,8 @@ export function createMockServer(
     dataDir?: string;
     multipartThreshold?: number;
     partSize?: number;
+    /** Synthetic test hold in real milliseconds, bounded for interrupt ACK. */
+    stepDurationMs?: number;
   } = {},
 ) {
   const port = options.port ?? Number(process.env.PORT ?? 8787);
@@ -55,6 +62,9 @@ export function createMockServer(
     multipartThreshold < 0
   )
     throw new Error('invalid multipart configuration');
+  const holdMs = options.stepDurationMs ?? Math.min(200, 1200 / speed);
+  if (!Number.isFinite(holdMs) || holdMs < 0 || holdMs > 300)
+    throw new Error('stepDurationMs must be between 0 and 300');
   const fail = options.fail ?? process.env.MOCK_FAIL;
   let base = `http://localhost:${port}`;
   const data = resolve(options.dataDir ?? '.mock-data');
@@ -78,7 +88,9 @@ export function createMockServer(
     sockets: Set<WebSocket>;
     started: boolean;
     paused: boolean;
-    timers: Set<ReturnType<typeof setTimeout>>;
+    planEpoch: number;
+    runner: ReturnType<typeof createHeldRunner>;
+    clock: ReturnType<typeof createPausableTimers>;
   }
   const uploads = new Map<string, Uploaded>();
   const sessions = new Map<string, Session>();
@@ -92,11 +104,7 @@ export function createMockServer(
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(event));
   };
   const later = (s: Session, ms: number, fn: () => void) => {
-    const timer = setTimeout(() => {
-      s.timers.delete(timer);
-      fn();
-    }, ms / speed);
-    s.timers.add(timer);
+    s.clock.schedule(ms / speed, fn);
   };
   const project = (id: string, vertical = false): KimoProject => ({
     id,
@@ -156,9 +164,8 @@ export function createMockServer(
     ops: Op[],
     tool: string,
     title: string,
-  ) {
+  ): HeldStep {
     const id = `action-${i}-${randomUUID()}`;
-    emit(s, { t: 'agent.status', state: 'acting', label: title });
     const samTarget =
       tool === 'sam_mask'
         ? {
@@ -178,33 +185,98 @@ export function createMockServer(
             ),
           }
         : undefined;
-    emit(s, {
-      t: 'agent.action.start',
-      id,
-      tool,
-      title,
-      args: {},
-      ...(samTarget ? { target: samTarget } : {}),
-    });
-    const applied = batch(s, ops, id);
-    if (samTarget && applied)
-      emit(s, {
-        t: 'sam.mask',
-        actionId: id,
-        clipId: samTarget.clipId,
-        maskAssetId: 'mask-2',
-        coordinateSpace: samTarget.coordinateSpace,
-        subjectLabel: samTarget.subjectLabel,
-        previewPolygon: samTarget.previewPolygon,
-      });
-    emit(s, { t: 'agent.action.progress', id, pct: 1 });
-    emit(s, {
-      t: 'agent.action.end',
-      id,
-      ok: applied,
-      ...(!applied ? { error: 'clip or track is locked' } : {}),
-      durationMs: Math.round(1200 / speed),
-    });
+    return {
+      start() {
+        const first = ops[0];
+        const clipId =
+          first &&
+          ('clipId' in first
+            ? first.clipId
+            : first.op === 'clip.add'
+              ? first.clip.id
+              : 'id' in first && first.op.startsWith('clip.')
+                ? first.id
+                : undefined);
+        const targetClip = clipId
+          ? s.snapshot.project.clips[clipId]
+          : undefined;
+        const target =
+          samTarget ??
+          (clipId
+            ? {
+                clipId,
+                time:
+                  targetClip?.start ??
+                  (first?.op === 'clip.add' ? first.clip.start : undefined),
+                trackId:
+                  targetClip?.trackId ??
+                  (first?.op === 'clip.add' ? first.clip.trackId : undefined),
+              }
+            : first?.op === 'track.add'
+              ? { trackId: first.track.id }
+              : undefined);
+        emit(s, { t: 'agent.status', state: 'acting', label: title });
+        emit(s, {
+          t: 'agent.action.start',
+          id,
+          tool,
+          title,
+          args: { ops },
+          ...(target ? { target } : {}),
+        });
+        // PROPOSED correlation from this synthetic producer, never arrival-order inference.
+        if (tool === 'add_web_image') {
+          const asset: Asset = {
+            id: 'web-original',
+            kind: 'image',
+            name: 'original test pattern',
+            url: `${base}/fixtures/image.png`,
+            source: 'web',
+            attribution: {
+              site: 'kimo-web original fixture',
+              pageUrl: 'https://github.com/naman-sharma12345/kimo-web',
+              license: 'CC0-1.0',
+            },
+          };
+          if (!s.snapshot.assets.some((a) => a.id === asset.id))
+            s.snapshot.assets.push(asset);
+          emit(s, { t: 'asset.added', asset, actionId: id });
+        }
+      },
+      finish() {
+        const applied = batch(s, ops, id);
+        if (samTarget && applied)
+          emit(s, {
+            t: 'sam.mask',
+            actionId: id,
+            clipId: samTarget.clipId,
+            maskAssetId: 'mask-2',
+            coordinateSpace: samTarget.coordinateSpace,
+            subjectLabel: samTarget.subjectLabel,
+            previewPolygon: samTarget.previewPolygon,
+          });
+        emit(s, { t: 'agent.action.progress', id, pct: 1 });
+        emit(s, {
+          t: 'agent.action.end',
+          id,
+          ok: applied,
+          ...(!applied ? { error: 'clip or track is locked' } : {}),
+          durationMs: holdMs,
+          resultSummary: applied
+            ? 'synthetic operation batch applied'
+            : 'batch rejected: locked entity',
+        });
+      },
+      stop() {
+        emit(s, {
+          t: 'agent.action.end',
+          id,
+          ok: false,
+          error: 'stopped by pause',
+          durationMs: 0,
+        });
+      },
+    };
   }
   function script(s: Session) {
     if (s.started) return;
@@ -374,7 +446,7 @@ export function createMockServer(
         },
       },
       'sam_mask',
-      'isolating the subject',
+      'selecting the synthetic ellipse',
     );
     push(
       {
@@ -552,41 +624,30 @@ export function createMockServer(
       'mark_review',
       'marking the finished sequence',
     );
-    ops.forEach((entry, i) =>
-      later(s, 6500 + i * (70000 / 45), function run() {
-        if (s.paused) {
-          later(s, 200, run);
-          return;
-        }
-        if (i === 18) {
-          const asset: Asset = {
-            id: 'web-original',
-            kind: 'image',
-            name: 'original test pattern',
-            url: `${base}/fixtures/image.png`,
-            source: 'web',
-            attribution: {
-              site: 'kimo-web original fixture',
-              pageUrl: 'https://github.com/naman-sharma12345/kimo-web',
-              license: 'CC0-1.0',
-            },
-          };
-          s.snapshot.assets.push(asset);
-          emit(s, { t: 'asset.added', asset });
-        }
-        action(s, i, entry.ops, entry.tool, entry.title);
-        if (i === ops.length - 1 && s.snapshot.status === 'editing') {
-          s.snapshot.status = 'awaiting_review';
-          emit(s, {
-            t: 'agent.message',
-            id: randomUUID(),
-            role: 'agent',
-            text: 'the edit is ready. play it and tell me what you think.',
-            kind: 'ask_review',
-          });
-        }
-      }),
-    );
+    const planEpoch = s.planEpoch;
+    later(s, 6500, () => {
+      if (planEpoch !== s.planEpoch) return;
+      const steps = ops.map((entry, i) => {
+        const step = action(s, i, entry.ops, entry.tool, entry.title);
+        return {
+          ...step,
+          finish() {
+            step.finish();
+            if (i === ops.length - 1 && s.snapshot.status === 'editing') {
+              s.snapshot.status = 'awaiting_review';
+              emit(s, {
+                t: 'agent.message',
+                id: randomUUID(),
+                role: 'agent',
+                text: 'the edit is ready. play it and tell me what you think.',
+                kind: 'ask_review',
+              });
+            }
+          },
+        };
+      });
+      s.runner.enqueue(steps);
+    });
   }
   async function body(req: http.IncomingMessage): Promise<unknown> {
     const parts: Buffer[] = [];
@@ -854,7 +915,12 @@ export function createMockServer(
           sockets: new Set(),
           started: false,
           paused: false,
-          timers: new Set(),
+          planEpoch: 0,
+          runner: createHeldRunner(
+            holdMs,
+            Math.max(0, 70000 / 45 / speed - holdMs),
+          ),
+          clock: createPausableTimers(),
         });
         json(res, 200, { sessionId: id, wsUrl });
         return;
@@ -976,19 +1042,56 @@ export function createMockServer(
       });
     }
   });
-  function interrupt(s: Session, text: string) {
-    emit(s, {
-      t: 'agent.status',
-      state: 'thinking',
-      label: 'reading your note',
-    });
-    const slower = text.toLowerCase().includes('slower');
-    Object.values(s.snapshot.project.clips)
-      .filter((c) => c.kind === 'video')
-      .slice(0, 3)
-      .forEach((c, i) =>
-        later(s, 100 + i * 50, () =>
-          action(
+  function interrupt(s: Session, text: string, clientMessageId?: string) {
+    s.planEpoch++;
+    s.runner.afterCurrent(() => {
+      emit(s, {
+        t: 'agent.status',
+        state: 'thinking',
+        label: 'reading your note',
+        ...(clientMessageId ? { inReplyTo: clientMessageId } : {}),
+      });
+      const slower = text.toLowerCase().includes('slower');
+      const clips = Object.values(s.snapshot.project.clips)
+        .filter((c) => c.kind === 'video')
+        .slice(0, 3);
+      const messageId = randomUUID();
+      const finishResponse = () => {
+        const prefix = clips.length
+          ? 'synthetic adjustment finished.'
+          : 'there are no video clips to adjust yet.';
+        emit(s, {
+          t: 'agent.message',
+          id: messageId,
+          role: 'agent',
+          text: prefix,
+          kind: 'say',
+          stream: { sequence: 0, done: false },
+        });
+        emit(s, {
+          t: 'agent.message',
+          id: messageId,
+          role: 'agent',
+          text: `${prefix} tell me what else to change.`,
+          kind: 'say',
+          stream: { sequence: 1, done: true },
+        });
+        emit(s, {
+          t: 'agent.message',
+          id: randomUUID(),
+          role: 'agent',
+          text: 'which synthetic adjustment should come next?',
+          kind: 'ask_choice',
+          choices: ['keep this framing', 'try another framing'],
+        });
+      };
+      if (!clips.length) {
+        finishResponse();
+        return;
+      }
+      s.runner.enqueue(
+        clips.map((c, i) => {
+          const step = action(
             s,
             100 + i,
             [
@@ -1002,20 +1105,17 @@ export function createMockServer(
             ],
             'respond_to_note',
             slower ? 'giving this moment more time' : 'refining the framing',
-          ),
-        ),
+          );
+          return {
+            ...step,
+            finish() {
+              step.finish();
+              if (i === clips.length - 1) finishResponse();
+            },
+          };
+        }),
       );
-    later(s, 300, () =>
-      emit(s, {
-        t: 'agent.message',
-        id: randomUUID(),
-        role: 'agent',
-        text: slower
-          ? 'i slowed the clips and gave each moment more room.'
-          : 'i adjusted the framing. tell me what else to change.',
-        kind: 'say',
-      }),
-    );
+    });
   }
   const wss = new WebSocketServer({ server });
   wss.on('connection', (ws, req) => {
@@ -1037,9 +1137,19 @@ export function createMockServer(
     ws.on('message', (raw) => {
       try {
         const event = clientEventSchema.parse(JSON.parse(raw.toString()));
-        if (event.t === 'interrupt') interrupt(s, event.text);
-        if (event.t === 'pause') s.paused = true;
-        if (event.t === 'resume') s.paused = false;
+        if (event.t === 'interrupt')
+          interrupt(s, event.text, event.clientMessageId);
+        if (event.t === 'pause') {
+          s.paused = true;
+          s.clock.pause();
+          s.runner.pause();
+          emit(s, { t: 'agent.status', state: 'idle', label: 'paused' });
+        }
+        if (event.t === 'resume' && s.paused) {
+          s.paused = false;
+          s.clock.resume();
+          s.runner.resume();
+        }
       } catch {
         ws.send(
           JSON.stringify({
@@ -1069,8 +1179,10 @@ export function createMockServer(
       return base;
     },
     async close() {
-      for (const s of sessions.values())
-        for (const timer of s.timers) clearTimeout(timer);
+      for (const s of sessions.values()) {
+        s.runner.dispose();
+        s.clock.dispose();
+      }
       for (const ws of wss.clients) ws.terminate();
       await new Promise<void>((r) => wss.close(() => r()));
       await new Promise<void>((r, reject) =>

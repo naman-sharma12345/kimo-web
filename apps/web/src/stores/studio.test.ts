@@ -36,3 +36,67 @@ describe('Studio compositor intent state', () => {
     });
   });
 });
+
+describe('single foreground agent presence', () => {
+  it('retains actual start identity and ignores an older end event', () => {
+    const receive = useStudio.getState().receive;
+    receive({
+      t: 'agent.action.start',
+      id: 'one',
+      tool: 'trim_clip',
+      title: 'trimming beach',
+      args: {},
+      target: { clipId: 'beach', time: 2 },
+    });
+    expect(useStudio.getState().activeAction).toMatchObject({
+      id: 'one',
+      target: { clipId: 'beach' },
+    });
+    receive({
+      t: 'agent.action.start',
+      id: 'two',
+      tool: 'move_clip',
+      title: 'moving lake',
+      args: {},
+      target: { clipId: 'lake' },
+    });
+    receive({ t: 'agent.action.end', id: 'one', ok: true, durationMs: 100 });
+    expect(useStudio.getState().activeAction?.id).toBe('two');
+    receive({ t: 'agent.action.end', id: 'two', ok: true, durationMs: 100 });
+    expect(useStudio.getState().activeAction).toBeNull();
+  });
+  it('keeps real status copy and resets foreground state across sessions', () => {
+    useStudio.getState().receive({
+      t: 'agent.status',
+      state: 'thinking',
+      label: 'reading your note',
+    });
+    expect(useStudio.getState().agentLabel).toBe('reading your note');
+    useStudio.getState().resetSession('new', 12, false, false);
+    expect(useStudio.getState()).toMatchObject({
+      activeAction: null,
+      agentLabel: '',
+    });
+  });
+});
+
+it('does not let a replayed historical start replace the current foreground', () => {
+  const receive = useStudio.getState().receive;
+  const first = {
+    t: 'agent.action.start' as const,
+    id: 'old',
+    tool: 'trim_clip',
+    title: 'old title',
+    args: {},
+    target: { clipId: 'old-clip' },
+  };
+  receive(first);
+  receive({
+    ...first,
+    id: 'current',
+    title: 'current title',
+    target: { clipId: 'current-clip' },
+  });
+  receive(first);
+  expect(useStudio.getState().activeAction?.id).toBe('current');
+});
